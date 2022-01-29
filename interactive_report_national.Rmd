@@ -1,0 +1,2720 @@
+---
+title: "Analysis of Police Stops Data"
+author: "Yun Choi"
+date: "9/2/2020"
+output: 
+  html_document: 
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    collapsed: false
+---
+
+# Abstract
+This analysis is based on police stops data from 14 cities across the country. Since data from each city has its own weaknesses, the analysis for each city is slightly different as well. But here are concepts that appear in most cities and thus worth taking a look at before jumping to your city. 
+
+## Stop Types by Initial Purpose and Subject Type
+Two city datasets are confined to stops initiated for criminal enforcement, while others also include stops made for other purposes like traffic enforcement. New York and Boston have criminal enforcement data only, which is called "Stop-and-Frisk" data in New York, and "Field Interrogation and Observation (FIO)" data in Boston. One difference between the two datasets is that New York data is confined to pedestrian stops while Boston one includes both pedestrian and vehicle stops. 
+
+Although most city datasets include stops made for various reasons, few specify the reason for each stop. Therefore, this analysis doesn't examine differences between stops made for different purposes, but I marked cities with that information for those who want to dive deeper.  
+
+Some city datasets have information on **the subject type** - whether the subject was a pedestrian or driver. If the analysis for your city is not divided into the two parts - **pedestrian** and **vehicle** stops - that means your city data doesn't have that information or include only one type of stops. You can find more details in your city section.  
+
+## Frisk and Search Rates
+Police officers may follow up a stop with a **frisk** (or pat-down) if they have reasons to suspect that the person is armed and dangerous. A frisk is supposed to be a limited search of the person’s outer clothing for weapons.
+
+A further **search**, on the other hand, involves officers probing for any kind of evidence - whether it be weapons, drugs or stolen items. Officers can search a vehicle without a warrant or consent if they have probable cause to believe there is evidence of a crime in your vehicle or reasonably believe a search is necessary for their own protection - a hidden weapon, for example. 
+
+In this analysis, the **frisk and search rates** refer to the proportion of stops followed by a frisk and search, respectively.
+
+## Hit Rates
+Another key concept is the **hit rate**, which is the proportion of successful frisks or searches where any kind of contraband was found. 
+
+## Summons and Arrest Rates
+Similar to the frisk and search rates, the **summons and arrest rates** are the proportion of stops led to a summons issuance and arrest, respectively. 
+
+Some city agencies stop pedestrians and drivers more aggressively than others, but regardless of their aggressiveness, racial disparities are found in most cities. Blacks and Hispanics are more likely to be stopped than whites in all the cities. And once stopped, Blacks face a frisk or search at a higher rate than whites. Within the same racial or ethnic group, males are more likely to be stopped and searched than females. 
+
+## Race and Ethnicity
+Subjects whose race is known but ethnicity is unknown, are categorized as their non-Hispanic race group because officers stopped them without any knowledge of their ethnicity. This allowed me to contain as many stops as possible. 
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# Load libraries
+library(readr)
+library(tidyverse)
+library(janitor)
+library(plotly)
+library(lubridate)
+library(readxl)
+library(tidycensus)
+library(DT)
+```
+
+```{r census}
+# Save the list of 2018 ACS estimate variables for easier reference
+variables <- load_variables(2018, "acs5")
+
+# Import census demographics data - Total, NH White, NH Black and Hispanic population
+# Import data for the states I need only
+census <- get_acs(geography = "place",
+                  variables = c("total_pop" = "B03002_001",
+                                "W_pop" = "B03002_003",
+                                "B_pop" = "B03002_004",
+                                "H_pop" = "B03002_012",
+                                "A_pop" = "B03002_006"),
+                  state = c("PA", "NC", "CA", "MN", "LA", "NY", "TX", "MA", "IL", "MN", "KY", "TN"),
+                  key = "8d3571e440820b7623bcf0710e3b75b8fcd8ceb1")
+
+# GEOIDs of the cities I'll analyze
+city_geoids <- c("4260000", "0644000", "2743000", "2255000", "2148006", "3651000", "0627000",
+                 "0667000", "1714000", "4835000", "4752006", "2507000", "3719000", "3755000")
+
+# Filter cities I need only using GEOIDs above
+# Spread the data for easier reference
+city_population <- census %>%
+  filter(GEOID %in% city_geoids) %>%
+  select(-moe) %>%
+  spread(key = "variable", value = "estimate") %>%
+  mutate(W_pop_pct = W_pop/total_pop*100,
+         B_pop_pct = B_pop/total_pop*100,
+         H_pop_pct = H_pop/total_pop*100)
+```
+
+```{r frequently used stuff}
+# Save groups frequently used for filtering
+X3race <- c("Black", "White", "Hispanic")
+X2gender <- c("Female", "Male")
+
+# Create a function changing first letter to upper case
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+      sep="", collapse=" ")
+}
+
+```
+
+# New York
+**City:** New York, New York (GEOID: 3651000) <br />
+**Population:** 22% Black, 32% White, 29% Hispanic <br />
+**Data Source:** [New York Polie Department (NYPD)](https://www1.nyc.gov/site/nypd/stats/reports-analysis/stopfrisk.page) <br />
+**Data Type:** Pedestrian Stops for Criminal Enforcement <br />
+**Data Timeframe:** Jan. 1, 2015 - Dec. 31, 2019 (Data available from 2003.) <br /> 
+**Data Strengths or Weaknesses:** 6 percent of suspects' racial information is unknown. <br /> 
+
+```{r}
+## Data from 2015 and 2016 has the same structure
+newyork_2015_raw <- read_csv("https://www1.nyc.gov/assets/nypd/downloads/excel/analysis_and_planning/stop-question-frisk/sqf-2015.csv") %>%
+  clean_names()
+
+newyork_2016_raw <- read_csv("https://www1.nyc.gov/assets/nypd/downloads/excel/analysis_and_planning/stop-question-frisk/sqf-2016.csv") %>%
+  clean_names()
+
+newyork_1516_raw <- rbind(newyork_2015_raw, newyork_2016_raw) 
+
+newyork_1516_clean <- newyork_1516_raw %>%
+  mutate(stop_year = year,
+         clean_race = case_when(race == "A" ~ "Asian",
+                                race == "B" ~ "Black",
+                                race == "I"  ~ "Other",
+                                race %in% c("P", "Q") ~ "Hispanic",
+                                race == "W" ~ "White",
+                                race == "X" ~ "Unknown"),
+         gender = case_when(sex == "M" ~ "Male",
+                            sex == "F" ~ "Female",
+                            sex == "Z" ~ "Unknown"),
+         age = as.numeric(age),
+         individual_frisk = case_when(frisked == "Y" ~ 1,
+                                      TRUE ~ 0),
+         individual_search = case_when(searched == "Y" ~ 1,
+                                       TRUE ~ 0),
+         individual_contraband = case_when(contrabn == "Y" ~ 1,
+                                           TRUE ~ 0),
+         individual_summons = case_when(sumissue == "Y" ~ 1,
+                                       TRUE ~ 0),
+         individual_arrest = case_when(arstmade == "Y" ~ 1,
+                                       TRUE ~ 0)) %>%
+  select(stop_year, clean_race, gender, age, 
+         individual_frisk, individual_search, individual_contraband, 
+         individual_summons, individual_arrest)
+```
+
+```{r}
+## Data from 2015 and 2016 has the same structure
+newyork_2017_raw <- read_excel("NEW YORK/csi-2947-2019-sqf-cy2017-updated1-9-2020.xlsx") %>%
+  clean_names()
+
+newyork_2018_raw <- read_excel("NEW YORK/sqf-2018.xlsx") %>%
+  clean_names()
+
+newyork_1718_raw <- rbind(newyork_2017_raw, newyork_2018_raw) %>%
+  select(-stop_location_premises_name, -supervising_action_corresponding_activity_log_entry_reviewed) %>%
+  select(sort(colnames(.)))
+
+newyork_2019_raw <- read_excel("NEW YORK/sqf-2019.xlsx") %>% 
+  clean_names() %>%
+  mutate(stop_frisk_id = stop_id_anony) %>%
+  select(-stop_id_anony, -ask_for_consent_flg, -consent_given_flg) %>%
+  select(sort(colnames(.)))
+
+newyork_1719_raw <- rbind(newyork_1718_raw, newyork_2019_raw)
+
+newyork_1719_clean <- newyork_1719_raw %>%
+  mutate(stop_year = year2,
+         clean_race = case_when(str_detect(suspect_race_description, "ASIAN") == TRUE ~ "Asian",
+                                str_detect(suspect_race_description, "HISPANIC") == TRUE ~ "Hispanic",
+                                str_detect(suspect_race_description, "AMER") == TRUE ~ "Other",
+                                suspect_race_description == "BLACK" ~ "Black",
+                                suspect_race_description == "WHITE"  ~ "White",
+                                TRUE ~ "Unknown"),
+         gender = case_when(suspect_sex == "FEMALE" ~ "Female",
+                            suspect_sex == "MALE" ~ "Male",
+                            TRUE ~ "Unknown"),
+         age = as.numeric(suspect_reported_age),
+         individual_frisk = case_when(frisked_flag == "Y" ~ 1,
+                                      TRUE ~ 0),
+         individual_search = case_when(searched_flag == "Y" ~ 1,
+                                       TRUE ~ 0),
+         individual_contraband = case_when(other_contraband_flag == "Y" |
+                                             firearm_flag == "Y" |
+                                             knife_cutter_flag == "Y" |
+                                             other_weapon_flag == "Y" |
+                                             weapon_found_flag == "Y" ~ 1,
+                                           TRUE ~ 0),
+         individual_arrest = case_when(suspect_arrested_flag == "Y" ~ 1,
+                                       TRUE ~ 0), 
+         individual_summons = case_when(summons_issued_flag == "Y" ~ 1,
+                                       TRUE ~ 0)) %>%
+  select(stop_year, clean_race, gender, age, 
+         individual_frisk, individual_search, individual_contraband, 
+         individual_summons, individual_arrest)
+
+newyork_1519_clean <- rbind(newyork_1516_clean, newyork_1719_clean) 
+```
+
+## Overall
+The NYPD stopped 71,064 individuals for criminal enforcement during the time frame. Blacks account for 56 percent of them while whites account for only 10 percent. When considering Blacks and whites make up 22 and 32 percent of the city population, respectively, that means **Blacks are eight times more likely to be stopped than whites in the city.** 
+```{r}
+newyork_population <- data.frame(c("Black", "White", "Hispanic"), 
+                                 c(1853055, 2713930, 2457137)) 
+
+colnames(newyork_population) <- c("clean_race", "population")
+
+newyork_1519_clean %>%
+  filter(!clean_race == "Unknown") %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(newyork_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+The NYPD significantly reduced the stop-and-frisk program in 2016 and has maintained it at a similar level ever since, but racial disparities between whites and Blacks have grown bigger. The share of Black males among all stopped suspects has increased since 2015 while that of white males has decreased. 
+
+Also note that the percentages below are based on 94 percent of stops where racial information of the suspect is known. But the bars, or the annual numbers of suspects stopped by the NYPD, include suspects whose racial identity is unknown. 
+
+```{r}
+newyork_totals_by_year <- newyork_1519_clean %>%
+  group_by(year = stop_year) %>%
+  summarize(Total = n())
+
+newyork_totals_with_RI_by_year <- newyork_1519_clean %>%
+  filter(!clean_race == "Unknown") %>%
+  group_by(year = stop_year) %>%
+  summarize(Total = n())
+
+newyork_1519_clean %>% 
+  group_by(year = stop_year, clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(newyork_totals_with_RI_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of suspects stopped by the city police are <b>", demographic, "</b>")) %>%
+    add_trace(data = newyork_totals_by_year,
+              y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("<b>", Total, "</b> stops this year"),
+            name = "Total Stops") %>%
+  layout(title = "NYPD - Shares of Pedestrian Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Frisk and Search Rates 
+Minorities are more likely to be frisked during a stop. Black males are frisked at 70 percent chances while white males have a 50-50 chance of being frisked. Minority males are also more likely to be searched.
+```{r}
+newyork_1519_clean %>%
+  group_by(clean_race, gender) %>%
+  summarize(frisk_rate = mean(individual_frisk) *100,
+            search_rate = mean(individual_search) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(frisk_rate, search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Hit Rates
+Black males get caught possessing contraband at the lowest rate. White females, at the highest rate. One in five white females frisked or searched were actually possessing contraband while one in eight Black males frisked or searched were possessing contraband. 
+```{r}
+newyork_1519_clean %>%
+  filter(individual_frisk == 1 | individual_search == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarize(hit_rate = round(mean(individual_contraband) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  datatable()
+```
+
+## Summons and Arrest Rates
+Despite being frisked or searched at a much lower rate than Black males, the proportion of white males arrested or later summoned is similar to that of Black males. 
+```{r}
+newyork_1519_clean %>%
+  group_by(clean_race, gender) %>%
+  summarize(summons_rate = mean(individual_summons) *100,
+            arrest_rate = mean(individual_arrest) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(arrest_rate, summons_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+# Boston
+**City:** Boston, Massachusetts (GEOID: 2507000) <br />
+**Population:** 45% White, 23% Black, 20% Hispanic <br />
+**Data Source:** [Boston Police Department (BPD)](https://data.boston.gov/dataset/boston-police-department-fio) <br />
+**Data Type:** Both Pedestrian and Vehicle Stops for Criminal Enforcement <br />
+**Data Timeframe:** January 2015 - September 2019 (Data available from 2011.) <br /> 
+**Data Strengths and Weaknesses:** The BPD has changed its record management system twice over the past 10 years - once in 2015 and once more in September 2019. I focused on the data from between January 2015 and September 2019. 
+
+One big issue with the data from that period is that only 53 percent of stops' search information is accurate due to the city's flawed record management system back then. So the frisk and search rates by race and gender are based on only 53 percent of the stops. Also, about 4 percent of stops don't have racial information of the suspect. Also, no information on whether contraband was found or not. Just whether a summons was later issued.  
+
+**This data also include individuals who were just observed and not stopped by officers. In this analysis, observations are regarded as stops, largely because it is difficult to differentiate observed individuals from stopped ones due to BPD's flawed record management system. Also, partly because mere observations also reveal officers’ implicit biases because they wouldn't observe someone unless they think the person is suspicious.**
+
+```{r}
+boston_1115_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/c696738d-2625-4337-8c50-123c2a85fbad/download/boston-police-department-fio.csv") %>%
+  clean_names()
+```
+
+```{r}
+## Yearly officer data 
+boston_15_officer_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/8119eb8d-6ee8-412d-a45d-53c367a98cea/download/fieldcontactforpublic2015.csv") %>%
+  clean_names()
+
+boston_16_officer_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/35f3fb8f-4a01-4242-9758-f664e7ead125/download/fieldcontactforpublic2016.csv") %>%
+  clean_names() 
+
+boston_17_officer_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/c72b9288-2658-4e6a-9686-ffdcacb585e7/download/rms_fieldcontacts_for_public_2017_202003111424.csv") %>%
+  clean_names() %>%
+  mutate(contact_date = as.Date(contact_date, format = "%m/%d/%Y %H:%S"))
+
+boston_18_officer_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/ee4f1175-54b6-4d06-bceb-26d349118e25/download/rms_fieldcontacts_for_public_2018_202003111433.csv") %>%
+  clean_names() %>%
+  mutate(contact_date = as.Date(contact_date, format = "%m/%d/%Y %H:%S"))
+
+boston_19_1_officer_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/35cfa498-cb10-43da-b8b2-948a66e48f26/download/rms_fieldcontacts_for_public_2019.csv") %>%
+  clean_names()
+
+## Yearly subject data 
+boston_15_subject_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/34453828-67ca-45f1-a31d-526b11ca49f4/download/fieldcontactnameforpublic2015.csv") %>%
+  clean_names()
+
+boston_16_subject_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/ebb9c51c-6e9a-40a4-94d0-895de9bf47ad/download/fieldcontactnameforpublic2016.csv") %>%
+  clean_names()
+
+boston_17_subject_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/f18a0632-46ea-4032-9749-f5b50cf7b865/download/rms_fieldcontacts_name_for_public_2017_202003111442.csv") %>%
+  clean_names()
+
+boston_18_subject_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/aa46b3ad-1526-4551-9f0f-6dbdfbb429c0/download/rms_fieldcontacts_name_for_public_2018_202003111443.csv") %>%
+  clean_names()
+  
+boston_19_1_subject_raw <- read_csv("https://data.boston.gov/dataset/4ebae674-28c1-4b9b-adc3-c04c99234a68/resource/b102d3a4-8b44-443e-bc09-00c44974c3b1/download/rms_fieldcontacts_name_for_public_2019.csv") %>%
+  clean_names()
+```
+
+```{r}
+## Merge yearly officer datasets
+colnames(boston_15_officer_raw) <- colnames(boston_17_officer_raw)
+colnames(boston_16_officer_raw) <- colnames(boston_17_officer_raw)
+
+boston_1519_officer_raw <- rbind(boston_15_officer_raw, boston_16_officer_raw, boston_17_officer_raw,
+                                 boston_18_officer_raw, boston_19_1_officer_raw)
+
+## Merge yearly subject datasets 
+boston_1519_subject_raw <- rbind(boston_15_subject_raw, boston_16_subject_raw,
+                                 boston_17_subject_raw, boston_18_subject_raw,
+                                 boston_19_1_subject_raw)
+```
+
+## Overall
+The BPD stopped, encountered or observed nearly 70 thousand - 67,574, specifically - individuals from 2015 throughout September, 2019. In a city where only 23 percent of the city population is Black, nearly 65 percent of those encountered by the BPD are Blacks and less than 20 percent are whites. **That means Blacks are seven times more likely to encounter with the city police than whites.**
+
+```{r}
+boston_population <- data.frame(c("Black", "White", "Hispanic"),
+                                c(154363, 302427, 133893)) 
+
+colnames(boston_population) <- c("clean_race", "population")
+
+boston_1519_subject_raw %>%
+  mutate(clean_race = case_when(ethnicity == "Hispanic Origin" ~ "Hispanic",
+                                TRUE ~ race)) %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(boston_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+Black males alone account for about 60 percent of individuals the BPD encounters every year. The share of each demographic group below remained stable during the timeframe. 
+```{r}
+boston_1519_totals_by_year <- boston_1519_subject_raw %>%
+  mutate(stop_date = as.Date(contact_date),
+         clean_race = case_when(ethnicity == "Hispanic Origin" ~ "Hispanic",
+                                TRUE ~ race),
+         gender = sex) %>%
+  group_by(year = year(stop_date)) %>%
+  summarise(Total = n()) %>%
+  filter(year %in% 2015:2019)
+
+boston_1519_subject_raw %>%
+  mutate(stop_date = as.Date(contact_date),
+         clean_race = case_when(ethnicity == "Hispanic Origin" ~ "Hispanic",
+                                TRUE ~ race),
+         gender = sex) %>%
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarise(stop_count = n()) %>%
+  left_join(boston_1519_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race & 
+           gender %in% X2gender &
+           year %in% 2015:2019) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> encounters this year"),
+            name = "Total Encounters") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of those encountered with the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "BPD - Shares of Encounters by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+
+```
+
+## Frisk, Search and Summons Rates
+Again, the frisk and search rates here were calculated based on 54 percent of the encounters with accurate search, frisk and summons information. 
+
+There are little racial disparities in frisk and search rates. Once stopped, males are frisked at 25 percent chances, regardless of their race and ethnicity. But whites have a larger share of those later summoned than Blacks.
+
+```{r}
+## Stops with accurate search result - where only one subject was investigated at a stop
+stops_with_search_result <- boston_1519_subject_raw %>%
+  group_by(fc_num) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  pull(fc_num)
+
+boston_1519_merged_for_search_rate <- boston_1519_officer_raw %>%
+  filter(fc_num %in% stops_with_search_result) %>%
+  left_join(boston_1519_subject_raw, by = "fc_num")
+
+boston_1519_merged_for_search_rate %>%
+  mutate(stop_date = as.Date(contact_date.x),
+         gender = sex,
+         clean_race = case_when(ethnicity == "Hispanic Origin" ~ "Hispanic",
+                                TRUE ~ race),
+         individual_frisked = case_when(frisked == "Y" ~ 1,
+                                        TRUE ~ 0),
+         individual_searched = case_when(searchperson == "Y" | searchvehicle == "Y" ~ 1,
+                                         TRUE ~ 0),
+         individual_summons = case_when(summonsissued == "Y" ~ 1,
+                                       TRUE ~ 0)) %>%
+  group_by(clean_race, gender) %>%
+  summarise(frisk_rate = mean(individual_frisked, na.rm = TRUE) *100,
+            search_rate = mean(individual_searched, na.rm = TRUE) *100,
+            summons_rate = mean(individual_summons, na.rm = TRUE) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(summons_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+# New Orleans
+**City:** New Orleans, Louisiana <br />
+**Population:** 59% Black, 31% White, 6% Hispanic <br />
+**Data Source:** [New Orleans Police Department (NOPD)](https://data.nola.gov/Public-Safety-and-Preparedness/Stop-and-Search-Field-Interviews-/kitu-f4uy) <br />
+**Data Type:** Pedestrian and Vehice Stops for Traffic and Criminal Enforcement <br />
+**Data Timeframe:** 2010 - 2019 <br />
+**Data Strengths or Weaknesses:** Pedestrian and vehicle stops were not differentiated, but this data has information on the reasons for stops. Below are the reasons in the order of their share, from the largest to the smallest:
+
+```{r}
+neworleans_raw <- read_csv("https://data.nola.gov/api/views/kitu-f4uy/rows.csv?accessType=DOWNLOAD") %>%
+  clean_names() %>%
+  mutate(stop_date = as.Date(event_date, format = "%m/%d/%Y %I:%M:%S %p"),
+         clean_race = if_else(sapply(tolower(as.character(subject_race)), CapStr) == "NANA",
+                              "Unknown",
+                              sapply(tolower(as.character(subject_race)), CapStr)),
+         gender = sapply(tolower(as.character(subject_gender)), CapStr))
+
+neworleans_raw %>%
+  group_by(stop_description) %>%
+  summarise(count = n()) %>%
+  mutate(pct = round(count/sum(count)*100, 1)) %>%
+  select(-count) %>%
+  arrange(desc(pct)) %>%
+  datatable()
+```
+Nearly 60 percent of the stops were initiated by the driver's traffic violation. 
+
+## Overall
+The NOPD stopped nearly 0.6 million individuals from 2010 to 2019, and 69 percent of those are Black and only 25 percent are white in a city where 59 percent of the popuation is Black and 31 percent is white. That means **Blacks are 1.4 times more likely to be stopped by the police than whites.** 
+```{r}
+neworleans_population <- data.frame(c("Black", "White", "Hispanic"),
+                                    c(229914, 119323, 21403))
+
+colnames(neworleans_population) <- c("clean_race", "population")
+
+neworleans_raw %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(neworleans_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+The share of Black females has increased while that of white males decreased. 
+```{r}
+neworleans_totals_by_year <- neworleans_raw %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n()) 
+
+neworleans_raw %>%
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(neworleans_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender &
+           year %in% 2010:2019) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> stops this year"),
+            name = "Total Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of those stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "NOPD - Shares of Police Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+#### Young Black males are most targeted
+Just like in Philadelphia, one third of Black males stopped by the NOPD were under 25 when they were stopped. 
+```{r}
+neworleans_black_males_stopped <- neworleans_raw %>%
+  filter(clean_race == "Black" & gender == "Male") %>% nrow()
+
+neworleans_raw %>%
+  filter(clean_race == "Black" & gender == "Male") %>%
+  mutate(age_group = case_when(subject_age <= 25 ~ "X25-",
+                               subject_age >= 26 & subject_age <= 35 ~ "X26_35",
+                               subject_age >= 36 & subject_age <= 45 ~ "X36_45",
+                               subject_age >= 46 & subject_age <= 60 ~ "X46_60",
+                               subject_age >= 61 ~ "X60+")) %>%
+  group_by(age_group) %>%
+  summarize(stop_pct = n()/neworleans_black_males_stopped*100) %>%
+  plot_ly(x = ~age_group, y = ~stop_pct, type = "bar",
+          hoverinfo = "text",
+          text = ~paste0("<b>", round(stop_pct), "%</b> of pedestrians and drivers stopped were in the age group ", 
+                         age_group)) %>%
+  layout(title = "Age Distribution of Black Males Stopped by NOPD") 
+```
+
+# Minneapolis
+**City:** Minneapolis, MN (GEOID: 2743000) <br />
+**Population:** 19% Black, 60% White, 10% Hispanic <br />
+**Data Source:** [City of Minneapolis](http://opendata.minneapolismn.gov/datasets/police-stop-data) <br />
+**Data Timeframe:** Nov. 1, 2016 - Aug. 30, 2020 <br />
+**Data Strengths or Weaknesses:** No distinction between pedestrian and vehicule stops. Also, doesn't have information on the search result - whether contraband was found or the individual was arrested. Just whether the individual or the vehicle was searched or not. Moreover, 24 percent of the stops don't have racial information of the subject. 
+
+But this data has the reasons for stops. The six distinctive reasons for stops follow, in the order of their share, from the biggest to the smallest:  
+
+```{r}
+minneapolis_raw_data <- read_csv("https://opendata.arcgis.com/datasets/215b4b543d894750aef86c725b56ee2a_0.csv") %>%
+  clean_names() %>%
+  mutate(stop_date = as.Date(gsub(" .*$", "", response_date), format = "%Y/%m/%d")) %>%
+  mutate(clean_race = case_when(race == "East African" ~ "Black",
+                                race == "Latino" ~ "Hispanic",
+                                TRUE ~ race)) %>%
+  filter(stop_date < "2020-09-01")
+
+minneapolis_raw_data %>%
+  group_by(problem) %>%
+  summarize(stop_count = n()) %>%
+  mutate(share = stop_count/sum(stop_count)*100) %>%
+  arrange(desc(share)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Overall
+The Minneapolis Police Department (MPD) has made 165,195 stops since November, 2016. More than half of the subjects whose racial identity is known, are Black and 32 percent are whites in a city where only 19 percent of the population is Black. Whites account for 60 percent of the population but take up only 32 percent of the traffic stops. **That means Blacks are five time more likely to be stopped than Hispanics and whites.**
+
+```{r}
+minneapolis_population <- data.frame(c("Black", "White", "Hispanic"),
+                                     c(79236, 248761, 39849))
+
+colnames(minneapolis_population) <- c("clean_race", "population")
+
+minneapolis_raw_data %>%
+  filter(!clean_race == "Unknown") %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(minneapolis_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend 
+The number of MPD stops has drastically declined for the past three years, but racial disparities grew. The share of Black males among those stopped by the MPD AND whose racial identity is known, has constantly increased while that of white males dropped. Now Black males alone account for nearly half of all individuals the MPD stops. 
+
+```{r}
+minneapolis_totals_by_year <- minneapolis_raw_data %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+minneapolis_totals_with_RI_by_year <- minneapolis_raw_data %>%
+  filter(!clean_race == "Unknown") %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+minneapolis_raw_data %>%
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(minneapolis_totals_with_RI_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of those stopped by the city police are <b>", demographic, "</b>")) %>%
+    add_trace(data = minneapolis_totals_by_year,
+              y = ~Total, type = "bar", 
+              hoverinfo = "text",
+              text = ~paste0("In <b>", year, "</b><br><b>",
+                             Total, "</b> stops this year"),
+              name = "Total Stops") %>%
+  layout(title = "MPD - Shares of Police Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Search Rates
+Black males have higher chances of getting searched during a stop. One in four Black males the MPD stops face a further search while only one in 10 white males the MPD stops face a search. Also, Black females are more likely to be searched than white males. Within the same sex, Black females are twice more likely to be searched than their white counterparts. 
+```{r}
+minneapolis_raw_data %>%
+  mutate(searched = case_when(person_search == "NO" & vehicle_search == "NO" ~ 0,
+                              person_search == "YES" & vehicle_search == "YES"~ 1,
+                              person_search == "NO" & vehicle_search == "YES"~ 1,
+                              person_search == "YES" & vehicle_search == "NO"~ 1,
+                              TRUE ~ 0)) %>%
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = mean(searched)*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  arrange(desc(search_rate)) %>%
+  datatable()
+```
+
+# Los Angeles
+**City:** Los Angeles, California (GEOID: 0644000) <br />
+**Population:** 9% Black, 28% White, 49% Hispanic <br />
+**Data Source:** [Los Angeles Police Department (LAPD)](https://data.lacity.org/A-Safe-City/Vehicle-and-Pedestrian-Stop-Data-2010-to-Present/ci25-wgt7) <br />
+**Data Type:** Both Pedestrian and Vehicle Stops <br />
+**Data Timeframe:** Jan. 1, 2010 - Aug. 22, 2020 <br />
+**Data Strengths and Weaknesses:** All stops have racial information of the subject. But no information on the reasons for stops, what kinds of post-stop activities were conducted and what were the results. So no hit, citation or arrest rates. 
+
+```{r}
+la_raw_data <- read_csv("https://data.lacity.org/api/views/ci25-wgt7/rows.csv?accessType=DOWNLOAD") %>%
+  clean_names() %>%
+  mutate(stop_date = as.Date(stop_date, format = "%m/%d/%Y")) %>%
+  mutate(clean_race = sapply(tolower(as.character(descent_description)), CapStr),
+         gender = case_when(sex_code == "M" ~ "Male", 
+                            sex_code == "F" ~ "Female",
+                            TRUE ~ sex_code),
+         post_stop_activity_indicator = case_when(post_stop_activity_indicator == "N" ~ 0,
+                                                  post_stop_activity_indicator == "Y" ~ 1,
+                                                  TRUE ~ 0)) %>%
+  filter(stop_date < "2020-08-23")
+```
+
+Over the past 10 years, the LAPD stopped nearly 8 million pedestrians and drivers. And 26 percent of those stopped are Black in a city where only 9 percent of the population is Black. Whites make up 28 percent of the population but only account for 21 percent of those stopped by the LAPD. That means **Blacks are nearly four times more likely to be stopped than whites, and three times more likely than Hispanics.**
+
+```{r}
+la_population <- data.frame(c("Black", "White", "Hispanic"),
+                            c(340688, 1127314, 1922889)) 
+
+colnames(la_population) <- c("clean_race", "population")
+
+la_raw_data %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(la_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Vehicle Stops Trend
+LAPD vehicle stops have declined over the past 10 years but racial disparities have grown bigger. The proportion of Black drivers among all drivers the LAPD stopped has significantly increased. 
+
+In 2010, Black males accounted for only 11 percent out of all drivers stopped by the city police that year, and that was much lower than the proportion of white males. But the number has dramatically increased and now the number of Black male drivers the LAPD stops is twice the number of white male drivers stopped, in a city where white population is three times bigger than Black population.
+
+```{r}
+la_vehicular_only <- la_raw_data %>%
+  filter(stop_type == "VEH") 
+
+la_vehicular_totals_by_year <- la_vehicular_only %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+la_vehicular_only %>%
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(la_vehicular_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops this year"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of drivers stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "LAPD - Shares of Vehicle Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Pedestrian Stops Trend
+Black males make up an even bigger share when it comes to pedestrian stops. This is a trend also found in other cities like Philadelphia. 
+
+More than one in four pedestrians the LAPD stopped over the past six years are Black males. 
+```{r}
+la_pedestrian_only <- la_raw_data %>%
+  filter(stop_type == "PED") 
+
+la_pedestrian_totals_by_year <- la_pedestrian_only %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+la_pedestrian_only %>%
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(la_pedestrian_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  # get rid of one dirty data 
+  filter(year %in% 2010:2020) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> pedestrian stops this year"),
+            name = "Total Pedestrian Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of pedestrians stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "LAPD - Shares of Pedestrian Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Post Activity Rates
+As mentioned earlier, this data has information on whether a stop followed by a further activity, but not what kind of activity it was. 
+
+Once stopped, Blacks and Hispanics are much more likely to face a further activity - whether it be a frisk, search or arrest. Nearly 40 percent of Black males stopped face a further activity while less than 20 percent of white males do so. 
+
+**In Los Angeles, Hispanic and Black females are more likely to face a further activity than white males.** In most cities, males are more likely to be frisked or searched, regardless of their race. Within the same sex, Black females are twice more likely to face a post-stop activity than white females. 
+```{r}
+la_raw_data %>%
+  group_by(clean_race, gender) %>%
+  summarise(post_stop_activity_rate = mean(post_stop_activity_indicator) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(post_stop_activity_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+# Philadelphia
+**City:** Philadelphia, Pennsylvania (GEOID: 4260000) <br />
+**Population:** 41% Black, 35% White, 14% Hispanic <br />
+**Data Source:** [Philadelphia Police Department (PPD)](https://www.opendataphilly.org/dataset/vehicle-pedestrian-investigations) <br />
+**Data Timeframe:** Jan. 1, 2014 - July 31, 2020 <br />
+**Stop Type:** Pedestrian and Vehicle Stops <br />
+**Data Strengths or Weaknesses:** Less than 1 percent of stops don't have racial information on the suspect. Data has information on what kinds of post-stop activities were conducted but not the reasons for those. <br />
+
+```{r}
+# Import data 
+philly_raw_data <- read_csv("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20car_ped_stops%20ORDER%20BY%20datetimeoccur%20desc%20&format=csv") %>%
+  clean_names() %>%
+  mutate(clean_race = case_when(race == "Black - Non-Latino" ~ "Black",
+                                race == "White - Non-Latino" ~ "White",
+                                race %in% c("Black - Latino", "White - Latino") ~ "Hispanic",
+                                TRUE ~ race),
+         age_group = case_when(age <= 25 ~ "X25-",
+                               age >= 26 & age <= 35 ~ "X26_35",
+                               age >= 36 & age <= 45 ~ "X36_45",
+                               age >= 46 & age <= 60 ~ "X46_60",
+                               age >= 61 ~ "X60+")) %>%
+  filter(!race == "Unknown")  %>%
+  filter(datetimeoccur < "2020-08-01")
+
+## Divide data by subject type
+philly_pedestrian_only <- philly_raw_data %>%
+  filter(stoptype == "pedestrian")
+
+philly_vehicular_only <- philly_raw_data %>%
+  filter(stoptype == "vehicle")
+```
+
+## Overall
+The PPD stopped nearly 3 million pedestrians and drivers over the past six years. **In a city where only 41 percent of the population is Black, 70 percent of those stopped are Blacks, mostly males.** That means Blacks are **three times more likely** to be stopped than whites. 
+
+```{r}
+## Create a population dataframe for later merging
+philly_population <- data.frame(c("Black", "White", "Hispanic"), 
+                                c(646234, 525784, 227711)) 
+
+colnames(philly_population) <- c("clean_race", "population")
+
+philly_raw_data %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(philly_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Vehicle Stops Trend
+Over the past six years, the PPD has drastically reduced pedestrian stops and expanded vehicle stops. But racial disparities in both types of stops have grown. 
+
+In 2014, 61 percent of drivers the PPD stopped were Blacks, and now 76 percent are Blacks. The share of Black drivers among all subjects has increased while that of other races decreased. 
+
+Also, over the past six years, the PPD has stopped more Black female drivers than white male drivers. The gap between the two groups has grown bigger and bigger, and the number of Black female drivers the PPD stopped this year double the number of their white male counterparts. 
+
+```{r}
+philly_vehicular_totals_by_year <- philly_vehicular_only %>%
+  group_by(year = year(datetimeoccur)) %>%
+  summarize(Total = n())
+
+philly_vehicular_only %>%
+  group_by(year = year(datetimeoccur), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(philly_vehicular_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops this year"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of drivers stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "PPD - Shares of Vehicle Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Pedestrian Stops Trend
+Pedestrian stop numbers show even bigger racial disparities. 
+
+As mentioned above, the number of PPD pedestrian stops has drastically declined during the timeframe, but racial disparities between Blacks and whites have grown bigger. **Black males and females combined, accounted for 69 percent of pedestrians the PPD stopped in 2015. The proportion of Blacks out of all PPD pedestrian stops has constantly increased - especially Black males - and now they account for 73 percent, in a city where only 42 percent of the population is Black.** And the vast majority of Blacks stopped by the PPD are males. 
+
+```{r}
+philly_pedestrian_totals_by_year <- philly_pedestrian_only %>%
+  group_by(year = year(datetimeoccur)) %>%
+  summarize(Total = n())
+
+philly_pedestrian_only %>%
+  group_by(year = year(datetimeoccur), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(philly_pedestrian_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> pedestrian stops this year"),
+            name = "Total Pedestrian Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of pedestrians stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "PPD - Shares of Pedestrian Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Young Black males are most targeted 
+One in three Black male drivers and pedestrians the PPD stopped over the past six years were 25 or younger when they were stopped. 
+```{r}
+philly_black_males_stopped <- philly_raw_data %>%
+  filter(clean_race == "Black" & gender == "Male") %>% 
+  nrow()
+
+philly_raw_data %>%
+  filter(clean_race == "Black" & gender == "Male") %>%
+  group_by(age_group) %>%
+  summarize(stop_pct = n()/philly_black_males_stopped*100) %>%
+  plot_ly(x = ~age_group, y = ~stop_pct, type = "bar",
+          hoverinfo = "text",
+          text = ~paste0("<b>", round(stop_pct), "%</b> of pedestrians and drivers stopped were in the age group ", 
+                         age_group)) %>%
+  layout(title = "Age Distribution of Black Males Stopped by PPD")
+```
+
+## Frisk and Search Rates 
+**Once stopped, Hispanic and Black males are nearly twice more likely to be frisked than white males during a stop.** Black and Hispanic males stopped by the PPD face a frisk at a 10 percent chance while white males get frisked only at a 5 percent chance. Minority males are also more likely to be searched. 
+
+```{r}
+philly_raw_data %>%
+  group_by(clean_race, gender) %>%
+  summarise(frisk_rate = mean(individual_frisked) *100,
+            search_rate = mean(individual_searched) *100) %>%
+  filter(clean_race %in% X3race & 
+           gender %in% X2gender) %>%
+  arrange(desc(frisk_rate, search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Hit Rates 
+Black males have the highest chances of being frisked or searched once stopped but have the smallest proportion of people getting caught possessing contraband. White females get caught at the highest rate. One in five white females the PPD frisked or searched actually possessed contraband. That suggests more innocent Blacks are being frisked or searched.
+
+```{r}
+philly_raw_data %>%
+  filter(individual_frisked == "1" | individual_searched == "1") %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = mean(individual_contraband)*100) %>%
+  filter(clean_race %in% X3race & 
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Arrest Rates
+Despite having a lower hit rate, Hispanic and Black males are slightly more likely to get arrested than white males. 
+```{r}
+philly_raw_data %>%
+  group_by(clean_race, gender) %>%
+  summarise(arrest_rate = round(mean(individual_arrested) *100, 1)) %>%
+  filter(clean_race %in% X3race & 
+           gender %in% X2gender) %>%
+  arrange(desc(arrest_rate)) %>%
+  datatable()
+```
+
+# Chicago
+**City:** Chicago, Illinois <br />
+**Population:** 30% Black, 33% White, 29% Hispanic<br />
+**Data Source:** [Illinois Department of Transportation (IDOT)](http://www.idot.illinois.gov/transportation-system/local-transportation-partners/law-enforcement/illinois-traffic-stop-study) <br />
+**Data Type:** Both Pedestrian and Vehicle Stops <br />
+**Data Timeframe:** Jan. 1, 2014 - Dec. 31, 2019 (Pedestrian stops data is available from 2017, which is the first year the data was collected.) <br />
+**Data Strengths or Weaknesses:** This data includes stops made by all law enforcement agencies. With the data, Jon should be able to find jurisdictions with bigger racial disparities than the Chicago Police Department if there's any. Will send merged data to Jon later. <br />
+
+```{r}
+## Import yearly pedestrian stops data
+X2017_IPSS_Data <- read_delim("ILLINOIS/2017 IPSS Data/2017 IPSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE")
+
+X2018_IPSS_Data <- read_delim("ILLINOIS/2018 IPSS Data/2018 IPSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE")
+
+# Make sure each dataset has the same column names for future rbind
+colnames(X2018_IPSS_Data) <- colnames(X2017_IPSS_Data)
+
+## Combine yearly pedestrian data and leave CPD data only
+chicago_pedestrian_raw <- rbind(X2017_IPSS_Data, X2018_IPSS_Data) 
+
+## Incorporate new 2019 data
+X2019_IPSS_Data <- read_delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/ILLINOIS/2019 IPSS Data/2019_IPSS_CPD_redacted.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DATESTOP = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>%
+  mutate(agency_name = "CHICAGO POLICE",
+         agency_code = 13194,
+         beatstop = as.character(beatstop)) 
+
+colnames(X2019_IPSS_Data) <- c(colnames(chicago_pedestrian_raw)[3:47], "agency_name", "agency_code")
+
+chicago_pedestrian_raw <- bind_rows(chicago_pedestrian_raw, X2019_IPSS_Data)
+
+## Import yearly vehicular stops data
+X2014_ITSS_Data <- read_delim("ILLINOIS/2014 ITSS Data/2014 ITSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE")
+
+X2015_ITSS_Data <- read_delim("ILLINOIS/2015 ITSS Data/2015 ITSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE")
+
+X2016_ITSS_Data <- read_delim("ILLINOIS/2016 ITSS Data/2016 ITSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE")
+
+X2017_ITSS_Data <- read_delim("ILLINOIS/2017 ITSS Data/2017 ITSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE") 
+
+X2018_ITSS_Data <- read_delim("ILLINOIS/2018 ITSS Data/2018 ITSS Data.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DateOfStop = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% filter(agency_name == "CHICAGO POLICE")
+
+## Combine yearly vehicular data and leave CPD data only
+chicago_vehicular_raw <- rbind(X2014_ITSS_Data, X2015_ITSS_Data, X2016_ITSS_Data, X2017_ITSS_Data, X2018_ITSS_Data)
+
+## Incorporate new 2019 data
+X2019_ITSS_Data <- read_delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/ILLINOIS/2019 ITSS Data/2019_ITSS_CPD_redacted.txt", "~", 
+                              escape_double = FALSE, 
+                              col_types = cols(DATESTOP = col_date(format = "%m/%d/%Y")),
+                              trim_ws = TRUE) %>%
+  clean_names() %>% 
+  mutate(agency_name = "CHICAGO POLICE",
+         agency_code = 13194,
+         zipcode = as.character(zipcode),
+         beat_i = as.character(beat_i)) 
+
+colnames(X2019_ITSS_Data) <- c(colnames(chicago_vehicular_raw)[3:54], "agency_name", "agency_code")
+
+chicago_vehicular_raw <- bind_rows(chicago_vehicular_raw, X2019_ITSS_Data)
+```
+
+## Vehicular - Overall
+The CPD officers made 1,733,493 vehicle stops during the timeframe for three distinctive reasons as below. As you can see, all vehicle stops were made for traffic enforcement. 
+```{r}
+chicago_vehicular_raw %>%
+  mutate(reason_for_stop = as.character(reason_for_stop)) %>%
+  mutate(reason_for_stop = case_when(reason_for_stop == 1 ~ "Moving Violation",
+                                     reason_for_stop == 2 ~ "Equipment",
+                                     reason_for_stop == 3 ~ "License Plate/Registration",
+                   TRUE ~ reason_for_stop)) %>%
+  group_by(reason_for_stop) %>%
+  summarise(count = n()) %>%
+  arrange(desc(reason_for_stop)) %>%
+  datatable()
+```
+
+```{r}
+chicago_vehicular_clean <- chicago_vehicular_raw %>%
+  mutate(stop_date = date_of_stop,
+         gender = case_when(driver_sex == 1 ~ "Male",
+                            driver_sex == 2 ~ "Female",
+                            TRUE ~ "NA"),
+         clean_race = case_when(driver_race == 1 ~ "White",
+                                driver_race == 2 ~ "Black",
+                                driver_race == 3 ~ "Native Indian",
+                                driver_race == 4 ~ "Hispanic",
+                                driver_race == 5 ~ "Asian",
+                                driver_race == 6 ~ "Other Pacific Islanders",
+                                TRUE ~ "NA"),
+         age = year(date_of_stop) - drivers_yearof_birth,
+         individual_searched = if_else(driver_search_conducted == 1 | vehicle_search_conducted == 1, 1, 0),
+         individual_contraband = if_else(driver_passenger_contraband_found == 1 | vehicle_contraband_found == 1, 1, 0),
+         individual_citation = if_else(result_of_stop == 1, 1, 0),
+         individual_warning = if_else(result_of_stop %in% 2:3 == TRUE, 1, 0))
+```
+
+Nearly 60 percent of drivers the CPD stopped are Blacks and only 15 percent are whites in a city where whites make up 33 percent of the population and Blacks, 30 percent. **That means Blacks are 4.4 times more likely to be stopped than whites in the city.** 
+```{r}
+chicago_population <- data.frame(c("Black", "White", "Hispanic"),
+                                 c(808165, 892323, 788140)) 
+
+colnames(chicago_population) <- c("clean_race", "population")
+
+chicago_vehicular_clean %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(chicago_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Vehicular - Trend
+The number of CPD vehicle stops has significantly increased during the timeframe and so do racial disparities. The share of Black drivers, especially male drivers, has significantly increased while that of white male and female drivers dropped. 
+```{r}
+chicago_vehicular_totals_by_year <- chicago_vehicular_clean %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+chicago_vehicular_clean %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(chicago_vehicular_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops this year"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           stop_count, "</b> drivers, or <br><b>",
+                           round(pct), "%</b> of drivers stopped <br>by the city police this year, are <b>", demographic, "</b>")) %>%
+  layout(title = "CPD - Shares of Vehicle Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+
+## Vehicular - Search, Warning and Citation Rates
+Once stopped, **Hispanic and Black males are nearly four times and three times more likely to face a search than white males, respectively. While white females are least likely to be searched than any other demographic groups below, Hispanic females are more likely to be searched than white males.**
+
+Blacks and Hispanics drivers have a higher warning rate and lower citation rate than white drivers. That suggests, **minority drivers are more likely to be stopped when they didn't commit traffic violation serious enough for an officer to issue a citation.** A smilar trend was also found in Los Angeles. 
+
+```{r}
+chicago_vehicular_clean %>%
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = mean(individual_searched) *100,
+            warning_rate = mean(individual_warning) *100,
+            citation_rate = mean(individual_citation) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Vehicular - Hit Rates
+**White males and females have the highest chances of being caught possessing contraband when frisked or searched.** Nearly 30 percent of white males the CPD searched were actually possessing contraband while only 17 percent of Black males the CPD searched were possessing contraband. 
+```{r}
+chicago_vehicular_clean %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = round(mean(individual_contraband) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  datatable()
+```
+
+## Vehicular - Stops without Citation or Contraband Recovery
+Stops not followed by a citation issuance or contraband recovery have increased as the CPD stops increasingly more drivers. 
+
+Hispanics have seen the biggest increase in the number of stops where the driver was released without being cited or found possessing contraband. Last year, the number of those stops for Hispanics was 34 times higher, compared to five years ago. Those for Black and white drivers were 31 times and 11 times higher respectively, compared to five years ago. 
+
+```{r}
+chicago_vehicular_clean %>%
+  filter(individual_citation == 0 & individual_contraband == 0) %>%
+  group_by(year = year(stop_date), clean_race) %>%
+  summarise(stop_count = n()) %>%
+  plot_ly(x = ~year, y = ~stop_count, color = ~clean_race, type = "bar",
+          hoverinfo = "text",
+          text = ~paste0(round(stop_count))) %>%
+  layout(title = "CPD - Counts of Vehicle Stops without Citation or Contraband Recovery by Race",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"))
+```
+
+
+## Pedestrian - Overall
+Racial disparities between Blacks and whites in Chicago are even bigger when it comes to pedestrian stops, which is a trend also found in Philadelphia and Los Angeles. 
+
+The CPD stopped 401,023 pedestrians from Jan. 1, 2017 to Dec. 31, 2019, and 70 percent of them are Black. When considering the city demographics, that means **Blacks are nine times more likely to be stopped than whites.**
+```{r}
+chicago_pedestrian_clean <- chicago_pedestrian_raw %>%
+  select(date_of_stop, race, gender, 
+         frisk_was_conducted, search_beyond_was_conducted,
+         search_beyond_found_contraband,
+         warning_citation_issued,
+         arrest) %>%
+  mutate(stop_date = date_of_stop,
+         gender = case_when(gender == 1 ~ "Male",
+                            gender == 2 ~ "Female",
+                            TRUE ~ "NA"),
+         clean_race = case_when(race == 1 ~ "White",
+                                race == 2 ~ "Black",
+                                race == 3 ~ "Native Indian",
+                                race == 4 ~ "Hispanic",
+                                race == 5 ~ "Asian",
+                                race == 6 ~ "Other Pacific Islanders",
+                                TRUE ~ "NA"),
+         individual_frisked = case_when(frisk_was_conducted == 1 ~ 1,
+                                        frisk_was_conducted == 2 ~ 0,
+                                        TRUE ~ 0),
+         individual_searched = case_when(search_beyond_was_conducted == 1 ~ 1,
+                                         search_beyond_was_conducted == 2 ~ 0,
+                                         TRUE ~ 0),
+         individual_contraband = case_when(search_beyond_found_contraband == "1" ~ 1,
+                                           search_beyond_found_contraband == "2" ~ 0,
+                                           TRUE ~ 0),
+         individual_arrested = case_when(arrest == "1" ~ 1,
+                                         arrest == "2" ~ 0,
+                                         TRUE ~ 0))
+
+chicago_pedestrian_clean %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(chicago_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Pedestrian - Trend
+Black males alone account for about 60 percent of pedestrians the CPD stopped in a city where only 30 percent of the population is Black. **Moreover, more Black female pedestrians were stopped than white males in a city where Black population is bigger than white one.** In other cities, males are generally more likely to be stopped than females. 
+
+Also, note that CPD pedestrian stops are up while pedestrian stops in other cities are down. 
+```{r}
+chicago_pedestrian_totals_by_year <- chicago_pedestrian_clean %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+chicago_pedestrian_clean %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(chicago_pedestrian_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% c("Black", "White", "Hispanic") &
+           gender %in% c("Female", "Male")) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> pedestrian stops this year"),
+            name = "Total Pedestrian Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           stop_count, "</b> drivers, or <br><b>",
+                           round(pct), "%</b> of drivers stopped <br>by the city police this year, are <b>", demographic, "</b>")) %>%
+  layout(title = "CPD - Shares of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Pedestrian - Frisk and Search Rates
+Male pedestrians are more likely to be frisked or searched than females. Within the same gender, Blacks and Hispanics are more likely to be frisked, searched or arrested. 
+```{r}
+chicago_pedestrian_clean %>%
+  group_by(clean_race, gender) %>%
+  summarise(
+    frisk_rate = mean(individual_frisked) *100,
+    search_rate = mean(individual_searched) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(frisk_rate, search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Pedestrian - Hit Rates
+White males and females have higher percent chances of getting caught possessing contraband when frisked or searched than Black males and females. White females, the group that has the lowest chances of getting frisked, actually have the highest chances of actually possessing contraband when investigated. 
+
+```{r}
+chicago_pedestrian_clean %>%
+  filter(individual_frisked == "1" | individual_searched == "1") %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = round(mean(individual_contraband)*100, 1)) %>%
+  arrange(desc(hit_rate)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  datatable()
+```
+
+## Pedestrian - Arrest Rates
+Despite having a hit rate lower than white males and females, Black male pedestrians are most likely to get arrested once stopped. The CPD arrested nearly 15 percent of Black male pedestrians they stopped, and 10 percent of their white counterparts. 
+```{r}
+chicago_pedestrian_clean %>%
+  group_by(clean_race, gender) %>%
+  summarise(
+    arrest_rate = round(mean(individual_arrested) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(arrest_rate)) %>%
+  datatable()
+```
+
+## Pedestrian - Stops without Contraband Recovery or Arrest 
+The chart below shows the race-specific numbers of pedestrian stops where the pedestrian was let go without getting caught possessing contraband or being arrested. The numbers for Blacks are much higher than those for other races. 
+```{r}
+chicago_pedestrian_clean %>%
+  filter(individual_contraband == 0 & individual_arrested == 0) %>%
+  group_by(year = year(stop_date), clean_race) %>%
+  summarise(stop_count = n()) %>%
+  plot_ly(x = ~year, y = ~stop_count, color = ~clean_race, type = "bar",
+          hoverinfo = "text",
+          text = ~paste0(round(stop_count))) %>%
+  layout(title = "CPD - Counts of Pedestrian Stops without Contraband Recovery or Arrest by Race",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"))
+```
+
+# San Francisco
+**City:** San Francisco, California (GEOID: 0667000) <br />
+**Population:** Black 5%, White 41%, Hispanic 15% <br />
+**Data Source:** [San Francisco Police Department (SFPD)](https://www.sanfranciscopolice.org/your-sfpd/published-reports/traffic-stops-reports) <br />
+**Data Type:** Vehicle Stops <br />
+**Data Timeframe:** Jan. 1, 2014 - Dec. 31, 2017 (OLD) & July 1, 2018 - Mar. 31, 2020 (NEW)<br />
+**Data Strengths or Weaknesses:** There's a 6-month gap where complete data isn't available. That part of data provided by the SFPD lacks information on the subject's ethnic identity. <br />
+
+```{r}
+sanfran_2017_raw <- read_excel("SAN FRANCISCO/sfpd-2017-White-House-Stops-by-Race-and-Ethnicity.xlsx") %>% 
+  clean_names() %>%
+  mutate(stop_date = as.Date(as.character(stop_date), format = "%Y%m%d"),
+         clean_race = case_when(ethnicity_description == "Hispanic" ~ "Hispanic",
+                                TRUE ~ race_description),
+         gender = case_when(sex_code == "M" ~ "Male",
+                            sex_code == "F" ~ "Female",
+                            TRUE ~ sex_code),
+         reason_for_stop = stop_reason_description, 
+         results_of_search = stop_search_description, 
+         result_of_stop = case_when(stop_result_description == "In Custody Arrest" ~ "1 In Custody Arrest",
+                                    stop_result_description == "Citation" ~ "2 Citation",
+                                    stop_result_description == "Warning" ~ "3 Warning",
+                                    stop_result_description == "Incident Report" ~ "4 Incident Report",
+                                    stop_result_description == "No Further Action" ~ "5 No Further Action",
+                                    TRUE ~ stop_result_description),
+         individual_searched = case_when(stop_search_description == "No Search" ~ 0,
+                                         TRUE ~ 1))
+```
+
+```{r}
+sanfran_2016_raw <- read_excel("SAN FRANCISCO/sfpd-all-traffic-stop-2016.xlsx") %>% 
+  clean_names()
+
+sanfran_2016_crossroads <- read_excel("SAN FRANCISCO/sfpd-all-traffic-stop-2016.xlsx", 
+    sheet = "Crossroads 2016") %>%
+    clean_names()
+
+sanfran_2016_estops <- read_excel("SAN FRANCISCO/sfpd-all-traffic-stop-2016.xlsx", 
+    sheet = "eStops 2016") %>%
+    clean_names()
+```
+
+```{r}
+sanfran_2016_clean_1 <- sanfran_2016_raw %>%
+  mutate(stop_date = as.Date(date_of_stop, format = "%d-%b-%y"),
+         clean_race = case_when(race == "W" ~ "White",
+                                race == "B" ~ "Black",
+                                race == "H" ~ "Hispanic",
+                                race == "A" ~ "Asian",
+                                race == "O" ~ "Other",
+                                TRUE ~ race),
+         gender = case_when(sex == "M" ~ "Male",
+                            sex == "F" ~ "Female",
+                            TRUE ~ sex),
+         reason_for_stop = case_when(reason_for_stop == 1 ~ "1 Moving Violation",
+                                     reason_for_stop == 2 ~ "2 Mechanical or Nonmoving Violation",
+                                     reason_for_stop == 3 ~ "3 DUI Check",
+                                     reason_for_stop == 4 ~ "4 Penal Code Violation",
+                                     reason_for_stop == 5 ~ "5 M.P.C. Violation",
+                                     reason_for_stop == 6 ~ "6 BOLO / APB / Warrant",
+                                     reason_for_stop == 7 ~ "7 Traffic Collision",
+                                     reason_for_stop == 8 ~ "8 Assistance To Motorist",
+                                     TRUE ~ as.character(reason_for_stop)),
+         results_of_search = case_when(results_of_search == "0" ~ 
+                                         "0 Searched as a Result of Probation or Parole Condition",
+                                       results_of_search == "1" ~ 
+                                         "1 No Search",
+                                       results_of_search == "2" ~ 
+                                         "2 Search Without Consent, Positive Result",
+                                       results_of_search == "3" ~ 
+                                         "3 Search Without Consent, Negative Result",
+                                       results_of_search == "4" ~ 
+                                         "4 Search With Consent, Positive Result",
+                                       results_of_search == "5" ~ 
+                                         "5 Search With Consent, Negative Result",
+                                       results_of_search == "6" ~ 
+                                         "6 Search Incidental To Arrest, Positive Result",
+                                       results_of_search == "7" ~ 
+                                         "7 Search Incidental To Arrest, Negative Result",
+                                       results_of_search == "8" ~ 
+                                         "8 Vehicle Inventory, Positive Result",
+                                       results_of_search == "9" ~ 
+                                         "9 Vehicle Inventory, Negative Result",
+                                       TRUE ~ as.character(results_of_search)),
+         result_of_stop = case_when(result_of_stop == 1 ~ "1 In Custody Arrest",
+                                    result_of_stop == 2 ~ "2 Citation",
+                                    result_of_stop == 3 ~ "3 Warning",
+                                    result_of_stop == 4 ~ "4 Incident Report",
+                                    result_of_stop == 5 ~ "5 No Further Action",
+                                    TRUE ~ as.character(result_of_stop)),
+         individual_searched = case_when(results_of_search == "1" ~ 1,
+                                         TRUE ~ 0))
+```
+
+```{r}
+sanfran_2016_clean_2 <- sanfran_2016_crossroads %>%
+  mutate(stop_date = date_of_stop,
+         clean_race = case_when(substr(race, 1, 1) == "B" ~ "Black",
+                                substr(race, 1, 1) == "W" ~ "White",
+                                substr(race, 1, 1) == "H" ~ "Hispanic",
+                                substr(race, 1, 1) == "A" ~ "Asian",
+                                substr(race, 1, 1) == "O" ~ "Other",
+                                TRUE ~ race),
+         gender = case_when(sex == "M" ~ "Male",
+                            sex == "F" ~ "Female",
+                            TRUE ~ sex),
+         individual_searched = case_when(results_of_search == "1 No Search" ~ 0,
+                                         TRUE ~ 1))
+```
+
+```{r}
+sanfran_2016_clean_3 <- sanfran_2016_estops %>%
+  mutate(stop_date = as.Date(as.character(date_of_stop), format = "%Y%m%d"),
+         clean_race = case_when(ethnicity == "Hispanic" ~ "Hispanic",
+                                TRUE ~ race),
+         gender = case_when(sex == "M" ~ "Male",
+                            sex == "F" ~ "Female",
+                            TRUE ~ sex),
+         result_of_stop = case_when(result_of_stop == "In Custory Arrest" ~ "1 In Custody Arrest",
+                                    result_of_stop == "Citation" ~ "2 Citation",
+                                    result_of_stop == "Warning" ~ "3 Warning",
+                                    result_of_stop == "Incident Report" ~ "4 Incident Report",
+                                    result_of_stop == "No Further Action" ~ "5 No Further Action",
+                                    TRUE ~ result_of_stop),
+         individual_searched = case_when(results_of_search == "No Search" ~ 0,
+                                         TRUE ~ 1))
+```
+
+```{r}
+sanfran_2014_raw <- read_excel("SAN FRANCISCO/DetailE5852014-15.xlsx", 
+    sheet = "2014") %>% clean_names()
+
+sanfran_2015_raw <- read_excel("SAN FRANCISCO/DetailE5852014-15.xlsx", 
+    sheet = " 2015") %>% clean_names()
+
+sanfran_1415_raw <- rbind(sanfran_2014_raw, sanfran_2015_raw) %>%
+  mutate(stop_date = as.Date(date_of_stop, format = "%d-%b-%y"),
+         clean_race = case_when(race == "W" ~ "White",
+                                race == "B" ~ "Black",
+                                race == "H" ~ "Hispanic",
+                                race == "A" ~ "Asian",
+                                race == "O" ~ "Other",
+                                TRUE ~ race),
+         gender = case_when(sex == "M" ~ "Male",
+                            sex == "F" ~ "Female",
+                            TRUE ~ sex),
+         results_of_search = case_when(results_of_search == "0" ~ 
+                                         "0 Searched as a Result of Probation or Parole Condition",
+                                       results_of_search == "1" ~ 
+                                         "1 No Search",
+                                       results_of_search == "2" ~ 
+                                         "2 Search Without Consent, Positive Result",
+                                       results_of_search == "3" ~ 
+                                         "3 Search Without Consent, Negative Result",
+                                       results_of_search == "4" ~ 
+                                         "4 Search With Consent, Positive Result",
+                                       results_of_search == "5" ~ 
+                                         "5 Search With Consent, Negative Result",
+                                       results_of_search == "6" ~ 
+                                         "6 Search Incidental To Arrest, Positive Result",
+                                       results_of_search == "7" ~ 
+                                         "7 Search Incidental To Arrest, Negative Result",
+                                       results_of_search == "8" ~ 
+                                         "8 Vehicle Inventory, Positive Result",
+                                       results_of_search == "9" ~ 
+                                         "9 Vehicle Inventory, Negative Result",
+                                       TRUE ~ as.character(results_of_search)),
+         result_of_stop = case_when(result_of_stop == 1 ~ "1 In Custody Arrest",
+                                    result_of_stop == 2 ~ "2 Citation",
+                                    result_of_stop == 3 ~ "3 Warning",
+                                    result_of_stop == 4 ~ "4 Incident Report",
+                                    result_of_stop == 5 ~ "5 No Further Action",
+                                    TRUE ~ as.character(result_of_stop)),
+         individual_searched = case_when(results_of_search == "1 No Search" ~ 0,
+                                         TRUE ~ 1))
+
+```
+
+```{r}
+sanfran_2014_crossroads <- read_excel("SAN FRANCISCO/DetailE5852014-15.xlsx",
+                                      sheet = "Crossroads 2014") %>% 
+  clean_names()
+
+sanfran_2015_crossroads <- read_excel("SAN FRANCISCO/DetailE5852014-15.xlsx", 
+    sheet = "Crossroads 2015") %>%
+  clean_names()
+
+sanfran_1415_crossroads <- rbind(sanfran_2014_crossroads, sanfran_2015_crossroads) %>%
+  mutate(stop_date = date_of_stop,
+         clean_race = case_when(substr(race, 1, 1) == "W" ~ "White",
+                                substr(race, 1, 1) == "B" ~ "Black",
+                                substr(race, 1, 1) == "H" ~ "Hispanic",
+                                substr(race, 1, 1) == "A" ~ "Asian",
+                                substr(race, 1, 1) == "O" ~ "Other",
+                                TRUE ~ race),
+         gender = case_when(sex == "F" ~ "Female",
+                            sex == "M" ~ "Male",
+                            TRUE ~ sex),
+         individual_searched = case_when(results_of_search == "1 No Search" ~ 0,
+                                         TRUE ~ 1))
+```
+
+```{r}
+sanfran_1415_raw_for_merge <- sanfran_1415_raw %>%
+  select(stop_date, clean_race, gender, age, 
+         reason_for_stop, results_of_search, result_of_stop,
+         individual_searched)
+
+sanfran_1415_crossroads_for_merge <- sanfran_1415_crossroads %>%
+  select(stop_date, clean_race, gender, age, 
+         reason_for_stop, results_of_search, result_of_stop,
+         individual_searched)
+
+sanfran1415_merged <- rbind(sanfran_1415_raw_for_merge, sanfran_1415_crossroads_for_merge)
+
+sanfran_2016_for_merge_1 <- sanfran_2016_clean_1 %>%
+  select(stop_date, clean_race, gender, age, 
+         reason_for_stop, results_of_search, result_of_stop,
+         individual_searched) 
+
+sanfran_2016_for_merge_2 <- sanfran_2016_clean_2 %>%
+  select(stop_date, clean_race, gender, age, 
+         reason_for_stop, results_of_search, result_of_stop,
+         individual_searched) 
+
+sanfran_2016_for_merge_3 <- sanfran_2016_clean_3 %>%
+  select(stop_date, clean_race, gender, age, 
+         reason_for_stop, results_of_search, result_of_stop,
+         individual_searched) 
+
+sanfran2016_merged <- rbind(sanfran_2016_for_merge_1, sanfran_2016_for_merge_2, sanfran_2016_for_merge_3)
+
+sanfran2017_merged <- sanfran_2017_raw %>%
+  select(stop_date, clean_race, gender, age, 
+         reason_for_stop, results_of_search, result_of_stop,
+         individual_searched)
+
+sanfran_merged <- rbind(sanfran1415_merged, sanfran2016_merged, sanfran2017_merged) %>%
+  mutate(clean_race = if_else(clean_race == "Asian or Pacific Islander", "Asian", clean_race),
+         reason_for_stop = case_when(reason_for_stop == 1 ~ "1 Moving Violation",
+                                     reason_for_stop == 2 ~ "2 Mechanical or Nonmoving Violation",
+                                     reason_for_stop == 3 ~ "3 DUI Check",
+                                     reason_for_stop == 4 ~ "4 Penal Code Violation",
+                                     reason_for_stop == 5 ~ "5 M.P.C. Violation",
+                                     reason_for_stop == 6 ~ "6 BOLO / APB / Warrant",
+                                     reason_for_stop == 7 ~ "7 Traffic Collision",
+                                     reason_for_stop == 8 ~ "8 Assistance To Motorist",
+                                     TRUE ~ as.character(reason_for_stop)))
+  
+```
+
+## OLD - Overall
+The SFPD made less than 1 percent - 0.1 percent specifically - of the stops with a warrant. 99 percent of SFPD stops were initiated by traffic violations. Below are the unique reasons for stops in the order of their share, from the biggest to the smallest:
+```{r}
+sanfran_merged %>%
+  group_by(reason_for_stop) %>%
+  summarise(stop_count = n()) %>%
+  mutate(pct = stop_count/sum(stop_count) *100) %>%
+  arrange(desc(pct)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+The SFPD made nearly half a million traffic stops - 442,004 stops, specifically - between Jan. 1, 2014 to Dec. 31, 2017. In a city where only 5 percent of the population is Black, 15 percent of those the SFPD stopped are Blacks. Whites make up 41 percent of the city population but account for only 37 percent of those the SFPD stopped. That means **Blacks are three times more likely to be stopped than whites in the city.** 
+```{r}
+sanfran_population <- data.frame(c("Black", "White", "Hispanic"),
+                                 c(43619, 353670, 132651))
+
+colnames(sanfran_population) <- c("clean_race", "population")
+
+sanfran_merged %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(sanfran_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## OLD - Trend
+The share of minority drivers, especially Black males, among all drivers stopped by the SFPD has increased during the timeframe. In 2014, Black males accounted for 10 percent of individuals stopped by the SFPD, but the number has constantly increased and now they make up 13 percent. During the same timeframe, the proportion of Hispanic male drivers has gone up as well from 10 percent to 12 percent. 
+```{r}
+sanfran_totals_by_year <- sanfran_merged %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+sanfran_merged %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(sanfran_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> stops this year"),
+            name = "Total Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of individuals stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "SFPD - Shares of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+
+```
+
+## OLD - Search Rates
+In San Francisco, just like in Minneapolis, **minority females have more chances to be searched during a stop than white males.** This is especially alarming when considering most SFPD stops are initiated by traffic violations. As you can see, Black females have higher chances to be searched than Hispanic and white males. Hispanic females are more likely to be searched than white males. 
+
+When compared within the same sex, **Black males are seven times more likely to be searched than white males, and Black females are six times more likely to be searched than white females.**
+
+```{r}
+sanfran_merged %>% 
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = mean(individual_searched)*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## OLD - Citation, Warning and Arrest Rates 
+```{r}
+sanfran_merged %>%
+  mutate(individual_citation = case_when(str_detect(result_of_stop, "Citation") == TRUE ~ 1,
+                                         TRUE ~ 0),
+         individual_warning = case_when(str_detect(result_of_stop, "Warning") == TRUE ~ 1,
+                                        TRUE ~ 0),
+         individual_arrest = case_when(str_detect(result_of_stop, "Custody Arrest") == TRUE ~ 1,
+                                       TRUE ~ 0)) %>%
+  group_by(clean_race, gender) %>%
+  summarise(citation_rate = mean(individual_citation) *100,
+            warning_rate = mean(individual_warning) *100,
+            arrest_rate = mean(individual_arrest) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(arrest_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## NEW - Overall
+```{r}
+sanfran_18_2 <- read_csv("SAN FRANCISCO/SDCS Jul2018-Dec2018.csv") %>%
+  clean_names()
+
+sanfran_18_2 <- sanfran_18_2[, 1:42]
+
+sanfran_19 <- read_csv("SAN FRANCISCO/SDCS 2019 Full Yr.csv") %>%
+  clean_names()
+
+sanfran_19 <- sanfran_19[, 1:42]
+
+sanfran_20 <- read_csv("SAN FRANCISCO/SDCS Jan2020 - Mar2020.csv") %>%
+  clean_names()
+
+sanfran_20 <- sanfran_20[, 1:42]
+  
+colnames(sanfran_18_2) <- colnames(sanfran_20)
+colnames(sanfran_19) <- colnames(sanfran_20)
+
+sanfran_1820_raw <- rbind(sanfran_18_2, sanfran_19, sanfran_20)
+
+sanfran_1820 <- sanfran_1820_raw %>%
+  mutate(stop_date = as.Date(str_replace(date_of_stop, "0018", "18"), format = "%m/%d/%y"),
+         perceived_race_or_ethnicity = as.character(perceived_race_or_ethnicity),
+         clean_race = case_when(perceived_race_or_ethnicity == "1" ~ "Asian",
+                                perceived_race_or_ethnicity == "2" ~ "Black",
+                                str_detect(perceived_race_or_ethnicity, "3") ~ "Hispanic",
+                                perceived_race_or_ethnicity == "7" ~ "White",
+                                TRUE ~ "Other"),
+         gender = case_when(perceived_gender_1_4 == 1 ~ "Male",
+                            perceived_gender_1_4 == 2 ~ "Female",
+                            perceived_gender_1_4 == 3 ~ "Transgender Man",
+                            perceived_gender_1_4 == 4 ~ "Transgender Woman",
+                            perceived_gender_5_gender_nonconforming == 5 ~ "Gender Nonconforming"),
+         age = perceived_age,
+         reason_for_stop = case_when(reason_for_stop == 1 ~ "Traffic Violation",
+                                     reason_for_stop == 2 ~ "Reasonable Suspicion",
+                                     reason_for_stop == 3 ~ "Parole/Probation Supervision",
+                                     reason_for_stop == 4 ~ "Incident to Arrest",
+                                     reason_for_stop == 5 ~ "Truancy",
+                                     reason_for_stop == 6 ~ "Consensual Encounter and Search",
+                                     reason_for_stop == 7 ~ "Possible conduct warranting disciple under Education Code",
+                                     reason_for_stop == 8 ~ "Determine if student violated school policy"),
+         individual_searched = ifelse(str_detect(actions_taken, "18,NA|20,NA"), 1, 0),
+         consent_based_search = ifelse(str_detect(basis_for_search, "^1$"), 1, 0),
+         ordor_based_search = ifelse(str_detect(basis_for_search, "7"), 1, 0),
+         individual_contraband = ifelse(str_detect(actions_taken, "21,NA"), 1, 0),
+         no_action = ifelse(results_of_stop == "1", 1, 0),
+         individual_warning = ifelse(results_of_stop == "^2", 1, 0),
+         individual_arrest_with_warrant = ifelse(results_of_stop == "5", 1, 0),
+         individual_arrest_without_warrant = ifelse(results_of_stop == "6", 1, 0))
+
+sanfran_1820_traffic <- sanfran_1820 %>%
+  filter(reason_for_stop == "Traffic Violation")
+```
+
+The SFPD stopped 107,696 drivers between July 1, 2018 and Mar. 31, 2020. In a city where only 5 percent of the population is Black, 18 percent of drivers the SFPD stopped are Black. **That means Black drivers are 4.4 times more likely to be stopped than white drivers.**
+
+```{r}
+sanfran_1820_traffic %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(sanfran_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  arrange(desc(per_1K)) %>%
+  datatable()
+```
+
+## NEW - Trend
+```{r}
+sanfran_totals_by_year <- sanfran_1820_traffic %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+sanfran_1820_traffic %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(sanfran_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> traffic stops this year"),
+            name = "Total Traffic Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           stop_count, "</b> drivers, or <br><b>",
+                           round(pct), "%</b> of drivers stopped <br>by the city police this year, are <b>", demographic, "</b>")) %>%
+  layout(title = "SFPD - Shares of Traffic Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## NEW - Search Rates 
+**Blacks, especially males, are most likely to be searched during a stop.** More than 18 percent of Black male drivers stopped by the SFPD, were searched, while less than 4 percent of their white counterparts were so. White males are also less likely to be searched than Black females who have a 7 percent chance of being searched.
+```{r}
+sanfran_1820_traffic %>%
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = round(mean(individual_searched, na.rm = TRUE) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate)) %>%
+  datatable()
+```
+
+## NEW - Hit Rates
+**Black drivers are most likely to be searched but least likely to get caught having contraband.** 14 percent and 11 percent of white male and female drivers the SFPD searched, were actually possessing contraband, while 8 percent and 5 percent of Black male and females were so.
+```{r}
+sanfran_1820_traffic %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = round(mean(individual_contraband) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  datatable()
+```
+
+## NEW - "Unjustified" Stop Rates
+More than one in 10 Black and Hispanic drivers stopped by the SFPD during the timeframe, were released without getting warned, cited, arrested or caught possessing contraband, while one in 20 whites drivers the SFPD stopped were so. That suggests **Black and Hispanic males and females are more likely to be stopped when they didn’t commit violations or crime serious enough for an officer to warn, cite or arrest, compared to whites.**
+
+```{r}
+sanfran_1820_traffic %>%
+  group_by(clean_race, gender) %>%
+  summarise(no_action_rate = round(mean(no_action, na.rm = TRUE) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(no_action_rate, warrantless_arrest_rate)) %>%
+  datatable()
+```
+
+## NEW - Odor-Based Search Rates 
+**The percent of searches initiated because officers "smelled" contraband, is much higher for Blacks, than for whites.** Nearly one in five searches of minority drivers were odor-based, while only one in 10 searches of white drivers were so. The data doesn't tell what odor each exactly was. I assume most of them were marijuana, but I recommend reaching out to the agency and ask what other types of contraband have odors.
+
+In many states, the odor of marijuana has given officers a reason to search a vehicle without a warrant, and in many cities, including Philadelphia, those searches have been disproportionately targeting minorities. [Here](https://www.inquirer.com/news/philadelphia/philadelphia-police-racial-profiling-marijuana-vehicle-stops-20191031.html)'s an article from the Philadelphia Inquirer, along similar lines. 
+
+```{r}
+sanfran_1820_traffic %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(ordor_based_search_rate = round(mean(ordor_based_search, na.rm = TRUE) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(ordor_based_search_rate)) %>%
+  datatable()
+```
+
+# Louisville
+**City:** Louisville/Jefferson County Metro Government, Kentucky (GEOID: 2148006) <br />
+**Population:** Black 23%, White 66%, Hispanic 5% <br />
+**Data Source:** [Louisville Metro Police Department (LMPD)](https://data.louisvilleky.gov/dataset/lmpd-stops-data) <br />
+**Stop Type:** Vehicle Stops <br />
+**Data Timeframe:** Jan. 1, 2009 - Aug. 28, 2020 <br />
+**Data Strengths or Weaknesses:** One very unique strength of Louisville data is that it includes demographic information - race and age - of police officers as well. But this analysis doesn't examine the dynamics between officers and drivers of different color. This data also contain the reasons for searches but there was no clean, consistent classification so that information is not used in this analysis. 
+
+```{r}
+louisville_raw <- read_csv("https://lky-open-data.s3.amazonaws.com/LMPD/LMPD_STOPS_DATA.CSV") %>%
+  clean_names() %>%
+  mutate(stop_date = as.Date(activity_date, format = "%m/%d/%Y"),
+         clean_race = case_when(driver_race == "WHITE" ~ "White",
+                                driver_race == "BLACK" ~ "Black",
+                                driver_race == "HISPANIC" ~ "Hispanic",
+                                driver_race == "ASIAN" ~ "Asian",
+                                driver_race == "UNKNOWN" ~ "Unknown",
+                                TRUE ~ "Other"),
+         gender = case_when(driver_gender == "M" ~ "Male",
+                            driver_gender == "F" ~ "Female",
+                            driver_gender == "U" ~ "Unknown"),
+         individual_citation = case_when(str_detect(activity_results, "CITATION") == TRUE ~ 1,
+                                         TRUE ~ 0),
+         individual_warning = case_when(str_detect(activity_results, "WARNING") == TRUE ~ 1,
+                                        TRUE ~ 0),
+         individual_searched = case_when(was_vehcile_searched == "YES" ~ 1,
+                                         TRUE ~ 0)) %>%
+  filter(stop_date < "2020-08-29")
+```
+
+## Overall
+Almost all LMPD stops were initiated by the driver's traffic violation. Less than 1 percent of LMPD stops were made with a warrant. 
+```{r}
+louisville_raw %>%
+  group_by(type_of_stop) %>%
+  summarise(stop_count = n()) %>%
+  mutate(pct = round(stop_count/sum(stop_count)*100, 1)) %>%
+  arrange(desc(pct)) %>%
+  datatable()
+```
+
+Louisville is among few cities in this analysis where Blacks and whites are stopped proportionately. The department has made half a million stops - 416,749 stops specifically - since 2009. Blacks, making up 23 percent of the population, account for 26 percent of the drivers stopped by the LMPD. Whites, making up 66 percent of the population, account for 68 percent. **That means Black drivers are as likely as white drivers to be stopped in the city.**
+
+```{r}
+louisville_population <- data.frame(c("Black", "White", "Hispanic"),
+                                     c(142945, 405969, 33343))
+
+colnames(louisville_population) <- c("clean_race", "population")
+
+louisville_raw %>%
+  filter(!clean_race == "Unknown") %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(louisville_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+But the city is starting to see racial disparities in policing. **Over the past six years, the proportion of Black male and female drivers among all drivers stopped by the LMPD has increased while that of white male and female drivers has dropped.**
+```{r}
+louisville_totals_by_year <- louisville_raw %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+louisville_raw %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(louisville_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% c("Black", "White", "Hispanic") &
+           gender %in% c("Female", "Male") &
+           year %in% 2009:2020) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops this year"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of drivers stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "LMPD - Shares of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+  
+```
+
+## Warning and Citation Rates
+Black and Hispanic drivers have a higher warning rate and lower citation rate than white drivers. 
+```{r}
+louisville_raw %>% 
+  group_by(clean_race, gender) %>%
+  summarise(warning_rate = mean(individual_warning) *100,
+            citation_rate = mean(individual_citation) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(citation_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+# Houston
+**City:** Houston, Texas (GEOID: 4835000) <br />
+**Population:** 22% Black, 25% White, 45% Hispanic <br />
+**Data Source:** [Houston Police Department Annual Racial Profiling Reports](https://www.houstontx.gov/police/racialprof.htm) <br />
+**Data Type:** Vehicle Stops<br />
+**Data Timeframe:** Jan. 1, 2015 - Dec. 31, 2019 <br />
+**Data Strengths or Weaknesses:** This analysis is based on annual HPD racial profiling reports, not raw stops data. Since I don't have access to the raw data, I couldn't analyze rates by both race and gender. This data has information on the reasons for stops. <br />
+
+## Overall
+The HPD made 1,631,475 vehicle stops between Jan. 1, 2015 and Dec. 31, 2019. And 97 percent of those were initiated by the driver's traffic violation. 
+```{r}
+houston_population <- data.frame(c("Black", "White", "Hispanic"),
+                                 c(506508, 565112, 1027693))
+
+colnames(houston_population) <- c("clean_race", "population")
+
+houston_1519_vehicular_stops <- read_excel("Stanford/HOUSTON/HPD_traffic_stops_1519_reports.xlsx", 
+                                           sheet = "stop_count")
+
+houston_1519_reasons_of_stop <- read_excel("Stanford/HOUSTON/HPD_traffic_stops_1519_reports.xlsx", 
+                                           sheet = "reason_for_stop")
+
+houston_1519_reasons_of_stop %>%
+  group_by(reason_for_stop) %>%
+  summarise(stop_count = sum(count)) %>%
+  mutate(pct = round(stop_count/sum(houston_1519_reasons_of_stop$count)*100, 1)) %>%
+  arrange(desc(stop_count)) %>%
+  datatable()
+```
+
+Black drivers account for 35 percent of those the HPD stopped, in a city where 22 percent of the population is Black. Whites, making up 25 percent of the city population, account for 41 percent of drivers stopped in the city during the 5-year period. **That means Blacks are as likely as whites to be stopped by the HPD.** 
+
+Hispanic drivers are four times less likely to be stopped than Blacks and whites. 
+
+```{r}
+houston_1519_vehicular_stops %>%
+  group_by(race) %>%
+  summarise(stop_count = sum(total)) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(houston_1519_vehicular_stops$total)*100) %>%
+  filter(race %in% X3race) %>%
+  left_join(houston_population, by = c("race" = "clean_race")) %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+The HPD has made more than 300,000 traffic stops every year. 
+```{r}
+houston_1519_vehicular_stops %>%
+  group_by(year) %>%
+  summarize(Total = sum(total)) %>%
+  plot_ly(x = ~year, y = ~Total, type = "bar", hoverinfo = "text",
+          text = ~Total)
+```
+
+The 2015 and 2016 annual reports didn't have gender-specific numbers of stops. So track changes from 2017. The share of Hispanics drastically increased in 2019 while that of whites dropped and that of Blacks remained the same. 
+
+In 2017 and 2018, the share of Hispanic male and female drivers among those the HPD stopped was 17 percent. But in 2019, the figure went up to 25 percent. But the figure is still low when considering Hispanics account for 45 percent of the city population. 
+
+```{r}
+houston_1519_vehicular_stops %>% 
+  mutate(female = if_else(is.na(female), total, female),
+         male = if_else(is.na(male), total, male)) %>%
+  select(race, year, female, male) %>%
+  gather(key = "gender", value = "stop_count", -race, -year) %>%
+  mutate(total = case_when(year == 2015 ~ 317116,
+                           year == 2016 ~ 327849,
+                           year == 2017 ~ 312285,
+                           year == 2018 ~ 355132,
+                           year == 2019 ~ 322049),
+         share = stop_count/total*100,
+         demographic = paste(race, gender)) %>%
+  filter(race %in% X3race) %>%
+  plot_ly(x = ~year, y = ~share, color = ~demographic,
+          type = "scatter", mode = "lines+markers")
+  
+```
+
+## Search Rates 
+But Black drivers are three times more likely to be searched than whites during a stop. 13 percent of Black drivers stopped by the HPD were searched while only 4 percent of their white counterparts were searched. This discrepancy is alarming when considering most stops were initiated by the drivers' traffic violations.
+
+There aren't big racial disparities in the share of consent-based searches. 27 percent of stops of Black drivers were based on the driver's consent while 26 percent of stops of whites were consent-based. 
+
+```{r}
+houston_1519_vehicular_stops %>%
+  group_by(race) %>%
+  summarise(stop_count = sum(total),
+            search_count = sum(searched),
+            consent_search_count = sum(just_consent)) %>%
+  mutate(search_rate = search_count/stop_count*100,
+         consent_search_share = consent_search_count/search_count*100) %>%
+  filter(race %in% X3race) %>%
+  arrange(desc(search_rate, consent_search_share)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+# Nashville
+**City:** Nashville-Davidson Metropolitan Government, TN (GEOID: 4752006) <br />
+**Population:** 28% Black, 55% White, 10% Hispanic <br />
+**Data Source:** Stanford Open Policing Project <br />
+**Data Type:** Vehicle Stops for Traffic Enforcement <br />
+**Data Timeframe:** December 2009 - March 2019 <br />
+**Data Strengths or Weaknesses:** No information on the search results - whether contraband was found. Less than 1 percent of stops don't have the racial information of the driver. This data has the reasons for stops. Most stops were initatated by traffic violations as below: <br />
+
+```{r}
+nashville_raw <- read_csv("Stanford/NASHVILLE/tn_nashville_2020_04_01.csv",
+                          col_types = cols(date = col_date(format = "%Y-%m-%d"))) %>%
+  clean_names() %>%
+  mutate(stop_date = date,
+         clean_race = if_else(sapply(tolower(as.character(subject_race)), CapStr) == "NANA",
+                              "Unknown",
+                              sapply(tolower(as.character(subject_race)), CapStr)),
+         gender = sapply(tolower(as.character(subject_sex)), CapStr))
+```
+
+```{r}
+nashville_raw %>%
+  group_by(violation) %>%
+  summarise(stop_count = n()) %>%
+  mutate(pct = round(stop_count/sum(stop_count)*100, 1)) %>%
+  arrange(desc(pct)) %>%
+  datatable()
+```
+
+## Overall
+Nashville is one of the cities with relatively small racial disparities. The Metropolitan Nashville Police Department (MNPD) made over 3 million vehicle stops - 3,092,351, specifically - during the timeframe. 38 percent of drivers the MNPD stopped are Blacks in a city where 28 percent of the population is Black. That means **Blacks are 1.4 times more likely to be stopped than whites**. 
+```{r}
+nashville_population <- data.frame(c("Black", "White", "Hispanic"),
+                                   c(182577, 365742, 68964)) 
+
+colnames(nashville_population) <- c("clean_race", "population")
+
+nashville_raw %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(nashville_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+The shares of drivers by race and gender remain similar during the timeframe. 
+```{r}
+nashville_totals_by_year <- nashville_raw %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+nashville_raw %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(nashville_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops this year"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           round(pct), "%</b> of drivers stopped by the city police are <b>", demographic, "</b>")) %>%
+  layout(title = "Share of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+
+## Frisk, Search, Warning, Citation and Arrest Rates
+Although Blacks and whites are stopped at a similar rate in the area, Blacks are much more likely to be frisked or searched. **Once stopped, Black males are three times more likely to be frisked, and two times more likely to be searched than white males.** Black females are more likely to be frisked and searched than white females as well. 
+
+Blacks were more likely to be arrested than whites. You can sort the table by whatever column you want by clicking on the column name. 
+
+```{r}
+nashville_raw %>%
+  group_by(clean_race, gender) %>%
+  summarise(frisk_rate = mean(frisk_performed, na.rm = TRUE) *100,
+            search_rate = mean(search_conducted, na.rm = TRUE) *100,
+            warning_rate = mean(warning_issued, na.rm = TRUE) *100,
+            citation_rate = mean(citation_issued, na.rm = TRUE) *100,
+            arrest_rate = mean(arrest_made, na.rm = TRUE) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate), arrest_rate) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+# Raleigh
+**City:** Raleigh, North Carolina (GEOID: 3755000) <br />
+**Population:** 28% Black, 53% White, 11% Hispanic <br />
+**Data Source:** North Carolina State Bureau of Investigation (NCSBI) <br />
+**Data Type:** Vehicle Stops <br />
+**Data Timrframe:** Jan. 1, 2014 - May 31, 2020 <br />
+**Data Strengths or Weaknesses:** Only 1.2 percent of subjects' racial identity is unknown. <br />
+
+```{r stops}
+## Import Stops data
+NC_stops_raw <- read.delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/DURHAM-RALEIGH/NCSBI/Stop.txt",
+                           header=FALSE) %>%
+  clean_names()
+
+## Add column names as raw data doesn't have those
+colnames(NC_stops_raw) <- c("stop_id", "agency", "stop_date", "stop_purpose", "action",
+                            "driver_arrest", "passenger_arrest", "encounter_force", "engage_force",
+                            "officer_injury", "driver_injury", "passenger_injury", 
+                            "officer_id", "stop_county", "stop_city")
+
+## Filter stops made by the Raleigh and Durham PDs
+raleighdurham_stops_raw <- NC_stops_raw %>%
+  filter(agency %in% c("Durham Police Department", "Raleigh Police Department")) %>%
+  filter(year(stop_date) >= 2014)
+```
+
+```{r}
+## Import Persons data
+NC_person_raw <- NC_person_raw <- read.delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/DURHAM-RALEIGH/NCSBI/PERSON.txt", 
+                                             header=FALSE) %>%
+  clean_names()
+
+## Add column names
+colnames(NC_person_raw) <- c("person_id", "stop_id", "person_type", "age", "gender", "ethnicity", "race")
+
+## Import Searches data
+NC_search_raw <- read.delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/DURHAM-RALEIGH/NCSBI/Search.txt", header=FALSE)
+
+## Add column names
+colnames(NC_search_raw) <- c("search_id", "stop_id", "person_id", "search_type", 
+                             "vehicle_search", "driver_search", "passenger_search", "property_search",
+                             "vehicle_seized", "personal_property_seized", "other_property_seized")
+
+## Import Contraband data
+NC_contraband_raw <- read.delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/DURHAM-RALEIGH/NCSBI/Contraband.txt", header=FALSE)
+
+## Add column names
+colnames(NC_contraband_raw) <- c("contraband_id", "search_id", "person_id", "stop_id", 
+                                 "ounces", "pounds", "pints", "gallons", "dosages", "grams", "kilos",
+                                 "money", "weapons", "dollars")
+
+## Import Search Basis data
+NC_searchbasis_raw <- read.delim("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/DURHAM-RALEIGH/NCSBI/SearchBasis.txt", header=FALSE)
+
+## Add column names
+colnames(NC_searchbasis_raw) <- c("searchbasis_id", "search_id", "person_id", "stop", "basis")
+```
+
+```{r}
+## Merge all the abovementioned data and create a complete dataset
+## Select columns I need only
+raleighdurham_merged <- raleighdurham_stops_raw %>%
+  mutate(stop_id = as.numeric(stop_id)) %>%
+  select(stop_id, agency, stop_date, stop_purpose, action, driver_arrest) %>%
+  left_join(NC_person_raw, by = "stop_id") %>%
+  left_join(NC_search_raw, by = c("stop_id", "person_id")) %>%
+  left_join(NC_contraband_raw, by = c("search_id", "person_id", "stop_id")) %>%
+  left_join(NC_searchbasis_raw, by = c("search_id", "person_id")) %>%
+  select(stop_id, agency, stop_date, stop_purpose, action, driver_arrest,
+         person_id, person_type, age, gender, ethnicity, race, 
+         search_type, driver_search, vehicle_search, contraband_id, 
+         stop, basis)
+```
+
+```{r}
+raleighdurham_merged[] <- lapply(raleighdurham_merged, as.character)
+
+## 
+raleighdurham_clean <- raleighdurham_merged %>%
+  filter(person_type == "D") %>%
+  mutate(stop_date = as.Date(substr(stop_date, 1, 10), format = "%Y-%m-%d"),
+         clean_race = case_when(ethnicity == "H" ~ "Hispanic",
+                                TRUE ~ case_when(race == "A" ~ "Asian",
+                                                 race == "B" ~ "Black",
+                                                 race == "I" ~ "Native American",
+                                                 race == "U" ~ "Other/Unknown",
+                                                 race == "W" ~ "White",
+                                                 TRUE ~ race)),
+         gender = case_when(gender == "M" ~ "Male",
+                            gender == "F" ~ "Female",
+                            TRUE ~ gender),
+         action = case_when(action == 1 ~ "Verbal Warning",
+                            action == 2 ~ "Written Warning",
+                            action == 3 ~ "Citation",
+                            action == 4 ~ "Arrest",
+                            action == 5 ~ "No Action"),
+         search_type = case_when(search_type == 1 ~ "Consent",
+                                 search_type == 2 ~ "Warrant",
+                                 search_type == 3 ~ "Probable Cause",
+                                 search_type == 4 ~ "Search Incident to Arrest",
+                                 search_type == 5 ~ "Protective Frisk"),
+         individual_searched = case_when(is.na(driver_search) & is.na(vehicle_search) ~ 0,
+                                         TRUE ~ 1),
+         individual_warning = if_else(str_detect(action, "Warning") == TRUE, 1, 0),
+         individual_citation = if_else(str_detect(action, "Citation") == TRUE, 1, 0),
+         individual_arrest = if_else(str_detect(action, "Arrest") == TRUE, 1, 0),
+         contraband_found = case_when(is.na(contraband_id) ~ 0,
+                                      TRUE ~ 1),
+         search_basis = case_when(basis == "ER" ~ "Erratic/Suspicious Behavior",
+                                  basis == "OB" ~ "Observation of Suspected Contraband",
+                                  basis == "OI" ~ "Other Official Information",
+                                  basis == "SM" ~ "Suspicious Movement",
+                                  basis == "TIP" ~ "Informant Tip",
+                                  basis == "WTNS" ~	"Witness Observation"))
+
+## Divide data by jurisdiction
+raleigh_clean <- raleighdurham_clean %>%
+  filter(agency == "Raleigh Police Department")
+
+durham_clean <- raleighdurham_clean %>%
+  filter(agency == "Durham Police Department")
+```
+
+## Overall
+The Raleigh Police Department (RPD) stopped 320,354 drivers during the timeframe. About 36 percent of them are white and 51 percent are Black. When considering the city population, Black drivers are 2.7 times more likely to be stopped than whites. 
+```{r}
+raleigh_population <- data.frame(c("Black", "White", "Hispanic"),
+                                 c(129058, 243865, 50130)) 
+
+colnames(raleigh_population) <- c("clean_race", "population")
+
+raleigh_clean %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(raleigh_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+Since 2014, the share of Black drivers, especially males, has drastically increased while that of white drivers has dropped. Now, in a city where Blacks account for 28 percent of the population, Black males alone take up more than 35 percent of vehicle stops made in the city. 
+
+Hover over each line to see the count and share of stops by each demographic group. 
+```{r raleigh}
+raleigh_totals_by_year <- raleigh_clean %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+raleigh_clean %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(raleigh_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops this year"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           stop_count, "</b> drivers, or <br><b>",
+                           round(pct), "%</b> of drivers stopped <br>by the city police this year, are <b>", demographic, "</b>")) %>%
+  layout(title = "RPD - Shares of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Search, Warning, Citation and Arrest Rates
+Here are distinctive reasons for a search in the order of their share, from the biggest to the smallest:
+```{r}
+raleigh_clean %>%
+  filter(individual_searched == 1) %>%
+  group_by(search_type) %>%
+  summarise(count = n()) %>%
+  mutate(pct = round(count/sum(count)*100, 1)) %>%
+  arrange(desc(pct)) %>%
+  datatable()
+```
+
+According to the numbers above, 12 percent of searches were made consent-based. 
+
+In Raleigh, Black males have the highest chances of getting searched during a stop. **Compared with white males, Black males are 2.6 times more likely to be searched but only 1.4 times more likely to be arrested.**
+```{r}
+raleigh_clean %>%
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = mean(individual_searched, na.rm = TRUE) *100,
+            warning_rate = mean(individual_warning, na.rm = TRUE) *100,
+            citation_rate = mean(individual_citation, na.rm = TRUE) *100,
+            arrest_rate = mean(individual_arrest, na.rm = TRUE) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Hit Rates
+Black males are more likely to be searched during a stop, and more likely to get caught possessing contraband during a search. 29 percent of Black males searched were caught possessing contraband while 23 percent of white males the RPD searched were caught having contraband. 
+```{r}
+raleigh_clean %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = round(mean(contraband_found) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  datatable()
+```
+
+# Durham
+**City:** Durham, North Carolina (GEOID: 3719000) <br />
+**Population:** 39% Black, 39% White, 14% Hispanic <br />
+**Data Source:** North Carolina State Bureau of Investigation (NCSBI) <br />
+**Data Type:** Vehicle Stops <br />
+**Data Timrframe:** Jan. 1, 2014 - June 30, 2020 <br />
+**Data Strengths or Weaknesses:** Only 1.2 percent of stops don't have racial information of the subject. <br />
+
+## Overall
+The Durham Police Department (DPD) stopped 103,881 drivers during the timeframe, and nearly 60 percent of them are Black and 27 percent white. When considering Blacks and whites equally make up 39 percent of the city population, that means **Blacks are 2.3 times more likely to be stopped than whites.** 
+```{r}
+durham_population <- data.frame(c("Black", "White", "Hispanic"),
+                                c(102390, 102686, 37229)) 
+
+colnames(durham_population) <- c("clean_race", "population")
+
+durham_clean %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(durham_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend 
+The share of each demographic group remain stable over the past six years.
+```{r durham}
+durham_totals_by_year <- durham_clean %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+durham_clean %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(durham_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> vehicle stops were made"),
+            name = "Total Vehicle Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           stop_count, "</b> drivers, or <br><b>",
+                           round(pct), "%</b> of drivers stopped <br>by the city police this year, are <b>", demographic, "</b>")) %>%
+  layout(title = "DPD - Shares of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+## Reasons for Searches
+21 percent of DPD searches during the timeframe were consent-based. Here are distinctive reasons for a search in the order of their share, from the biggest to the smallest:
+```{r}
+durham_clean %>%
+  filter(individual_searched == 1) %>%
+  group_by(search_type) %>%
+  summarise(count = n()) %>%
+  mutate(pct = round(count/sum(count)*100, 1)) %>%
+  arrange(desc(pct)) %>%
+  datatable()
+```
+
+## Search, Warning, Citation and Arrest Rates
+Just like in Raleigh, Black males in Durham have the highest chances of getting searched, once stopped. **Black males are nearly 4.8 times more likely to be searched, and 3.6 times more likely to be arrested than white males.** 
+
+Also, Black females are more likely to be searched during a stop than white males. Usually, males are more likely to be searched than females, regardless of their racial identity. 
+```{r}
+durham_clean %>%
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = mean(individual_searched, na.rm = TRUE) *100,
+            warning_rate = mean(individual_warning, na.rm = TRUE) *100,
+            citation_rate = mean(individual_citation, na.rm = TRUE) *100,
+            arrest_rate = mean(individual_arrest, na.rm = TRUE) *100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate)) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Hit Rates
+**White male drivers are 4.8 times less likely to be searched than Black male drivers, but have the same hit rate.** 37 percent of Black and white males searched by the DPD were actually possessing contraband. 
+```{r}
+durham_clean %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = round(mean(contraband_found) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  datatable()
+```
+
+# Fresno
+**City:** Fresno, California (GEOID: 3755000) <br />
+**Population:** 7% Black, 27% White, 49% Hispanic <br />
+**Data Source:** California Department of Justice <br />
+**Data Type:** Pedestrian and Vehicle Stops, Not Differentiated <br />
+**Data Timrframe:** Jan. 1, 2019 - July 27, 2020 <br />
+**Data Strengths or Weaknesses:** Only one year and seven months' worth of data is available. But this data contains information other cities' data doesn't have - whether the stopped person is LGBT or a K-12 student, for example. But I didn't specifically examine stops of LGBT people or K-12 students because the sample sizes are too small. <br />
+
+```{r}
+fresno_19_raw <- read_excel("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/FRESNO/Fresno PD 2019 Stop Data/CA0100500_PRA_EXTRACT_2019_0101_1231.xlsx") %>%
+  janitor::clean_names() 
+
+fresno_20_raw <- read_excel("/Volumes/Yun Choi/OTV/GF_police_traffic_stops/FRESNO/Fresno PD 2020 Stop Data/CA0100500_SDCS_PRA_EXTRACT_2020_0101_0727.xlsx") %>%
+  janitor::clean_names()
+```
+
+```{r}
+fresno_raw <- rbind(fresno_19_raw[, 1:35], fresno_20_raw[, 1:35])
+
+fresno <- fresno_raw %>%
+  mutate(stop_date = as.Date(date_of_stop, "%m/%d/%Y"),
+         gender = case_when(perceived_gender_1_4_12 == "1" ~ "Male",
+                            perceived_gender_1_4_12 == "2" ~ "Female",
+                            perceived_gender_1_4_12 == "3" ~ "Transgender Man",
+                            perceived_gender_1_4_12 == "4" ~ "Transgender Woman",
+                            perceived_gender_5_gender_nonconforming_13 == "5" ~ "Gender Nonconforming"),
+         clean_race = case_when(perceived_race_or_ethnicity_11 == 1 ~ "Asian",
+                                perceived_race_or_ethnicity_11 == 2 ~ "Black",
+                                perceived_race_or_ethnicity_11 == 3 ~ "Hispanic",
+                                perceived_race_or_ethnicity_11 == 7 ~ "White",
+                                TRUE ~ "Other"),
+         is_lgbt = ifelse(is_lgbt_14 == "Y", 1, 0),
+         age = perceived_age_15,
+         if_k_12_student = ifelse(if_k_12_school_is_stop_of_a_student_18 == "Y", 1, 0),
+         reason_for_stop = case_when(reason_for_stop_19 == 1 ~ "Traffic Violation",
+                                     reason_for_stop_19 == 2 ~ "Reasonable Suspicion",
+                                     reason_for_stop_19 == 3 ~ "Parole/Probation Supervision",
+                                     reason_for_stop_19 == 4 ~ "Incident to Arrest",
+                                     reason_for_stop_19 == 5 ~ "Truancy",
+                                     reason_for_stop_19 == 6 ~ "Consensual Encounter and Search",
+                                     reason_for_stop_19 == 7 ~ "Possible conduct warranting disciple under Education Code",
+                                     reason_for_stop_19 == 8 ~ "Determine if student violated school policy"),
+         individual_searched = ifelse(str_detect(actions_taken_26, "18,NA|20,NA"), 1, 0),
+         consent_based_search = ifelse(str_detect(basis_for_search_27, "^1$"), 1, 0),
+         ordor_based_search = ifelse(str_detect(basis_for_search_27, "7"), 1, 0),
+         individual_contraband = ifelse(str_detect(actions_taken_26, "21,NA"), 1, 0),
+         no_action = ifelse(results_of_stop_31 == "1", 1, 0),
+         individual_warning = ifelse(results_of_stop_31 == "^2", 1, 0),
+         individual_arrest_with_warrant = ifelse(results_of_stop_31 == "5", 1, 0),
+         individual_arrest_without_warrant = ifelse(results_of_stop_31 == "6", 1, 0))
+```
+
+## Reasons for Stops
+The Fresno Police Department (FPD) stops data includes both pedestrian and vehicle stops but the two types of stops are not differentiated from each other. But the list of the most common reasons for FPD stops below, shows **81 percent of FPD stops during the time frame were for traffic enforcement, and about 16 percent were for criminal enforcement.**
+
+```{r}
+fresno %>%
+  group_by(reason_for_stop) %>%
+  summarize(stop_count = n()) %>%
+  mutate(pct = round(stop_count/sum(stop_count)*100)) %>%
+  arrange(desc(stop_count)) %>%
+  datatable()
+```
+
+
+## Overall
+The FPD stopped 60,772 pedestrians and drivers during the time frame. **In a city where only 7 percent of the population is Black, nearly 14 percent of individuals the FPD stopped are Blacks.** Considering the city demographic, that means **Blacks are nearly two times more likely to be stopped than Hispanics and whites.**
+
+```{r}
+fresno_population <- data.frame(c("Black", "White", "Hispanic"),
+                                 c(37601, 141299, 257830)) 
+
+colnames(fresno_population) <- c("clean_race", "population")
+
+fresno %>%
+  group_by(clean_race) %>%
+  summarise(stop_count = n()) %>%
+  ungroup() %>%
+  mutate(overall_pct = stop_count/sum(stop_count)*100) %>%
+  filter(clean_race %in% X3race) %>%
+  left_join(fresno_population, by = "clean_race") %>%
+  mutate(per_1K = stop_count/population*1000) %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  datatable()
+```
+
+## Trend
+The share of each demographic group remains similar. Please note that the bar for 2020 is shorter because the 2020 data includes the first seven months only. 
+```{r}
+fresno_totals_by_year <- fresno %>%
+  group_by(year = year(stop_date)) %>%
+  summarize(Total = n())
+
+fresno %>% 
+  group_by(year = year(stop_date), clean_race, gender) %>%
+  summarize(stop_count = n()) %>%
+  left_join(fresno_totals_by_year, by = "year") %>%
+  mutate(pct = stop_count/Total*100) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  mutate(demographic = paste(clean_race, gender)) %>%
+  ungroup() %>%
+  plot_ly(x = ~year) %>%
+  add_trace(y = ~Total, type = "bar", 
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           Total, "</b> stops this year"),
+            name = "Total Stops") %>%
+  add_trace(y = ~pct, color = ~demographic, 
+            type = "scatter", mode = "lines+markers", yaxis = "y2",
+            hoverinfo = "text",
+            text = ~paste0("In <b>", year, "</b><br><b>",
+                           stop_count, "</b> individuals, or <br><b>",
+                           round(pct), "%</b> of individuals stopped <br>by the city police this year, are <b>", demographic, "</b>")) %>%
+  layout(title = "FPD - Shares of Stops by Race and Gender",
+         xaxis = list(title = ""),
+         yaxis = list(side = "left", title = "Count"),
+         yaxis2 = list(side = "right", overlaying = "y", title = "Percent (%)", showgrid = FALSE, zeroline = FALSE))
+```
+
+
+## Search Rates
+**In Fresno, Blacks are not only more likely to be stopped, but also more likely to be searched during a stop, than whites.**
+
+Once stopped, males are more likely to be searched than females. Within the same sex, Blacks are most likely to be searched, followed by Hispanics. Whites are least likely to be searched among the three races. Black males are most likely to be searched. 
+
+**One in five Black males stopped by the FPD were searched, while only one in 10 white males the FPD stopped were searched.**
+
+```{r}
+fresno %>%
+  group_by(clean_race, gender) %>%
+  summarise(search_rate = round(mean(individual_searched) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(search_rate)) %>%
+  datatable()
+```
+
+## Hit Rates
+**Black males are more likely to be searched, but less likely to get caught possessing contraband than white males.** Less than 9 percent of Black males searched by the FPD, were actually possessing contraband while 12 percent of white males the FPD searched, were having contraband. Black males getting caught at the lowest rate suggests more innocent Black males are being searched than any other demographic groups below. 
+
+```{r}
+fresno %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(hit_rate = round(mean(individual_contraband) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(hit_rate)) %>%
+  datatable()
+```
+
+## "Unjustified" Stops and Warrantless Arrests
+* The table below shows:
+  + Percentages of stops where the individual was released without getting warned, cited, arrested or caught possessing contraband;
+  + Percentages of stops where the person was arrested with a warrant;
+  + Percentages of stops where the person was arrested without a warrant. 
+
+The numbers below suggest **Black males and females are more likely to be stopped when they didn't commit violations serious enough for an officer to warn, cite or arrest, compared to whites. Also, Blacks are more likely to get arrested with and without a warrant during a stop.** 
+
+More than 12 percent Black males stopped by the FPD last year, were released without getting warned, cited, arrested or caught possessing contraband, while less than 8 percent of white males were so. 
+
+Nearly 7 percent of Black males the FPD stopped were arrested without warrants, while less than 4 percent of their white counterparts were so. 
+
+```{r}
+fresno %>%
+  group_by(clean_race, gender) %>%
+  summarise(no_action_rate = round(mean(no_action, na.rm = TRUE) *100, 1),
+            arrest_with_warrant_rate = round(mean(individual_arrest_with_warrant) *100, 1),
+            warrantless_arrest_rate = round(mean(individual_arrest_without_warrant) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(no_action_rate, warrantless_arrest_rate)) %>%
+  datatable()
+```
+
+## Odor-Based Search Rates 
+Another interesting finding is that the percent of searches initiated because officers "smelled" contraband, is much higher for Blacks, than for whites. More than 3 percent of FPD searches of Black males and females were based on odors of contraband. The data doesn't tell what odor each exactly was. I assume most of them were marijuana, but I recommend reaching out to the agency and ask what other types of contraband have odors.
+
+In many states, the odor of marijuana has given officers a reason to search a vehicle without a warrant, and in many cities, including Philadelphia, those searches have been disproportionately targeting minorities. Here's an article from the Philadelphia Inquirer, along similar lines: https://www.inquirer.com/news/philadelphia/philadelphia-police-racial-profiling-marijuana-vehicle-stops-20191031.html
+
+```{r}
+fresno %>%
+  filter(individual_searched == 1) %>%
+  group_by(clean_race, gender) %>%
+  summarise(ordor_based_search_rate = round(mean(ordor_based_search, na.rm = TRUE) *100, 1)) %>%
+  filter(clean_race %in% X3race &
+           gender %in% X2gender) %>%
+  arrange(desc(ordor_based_search_rate)) %>%
+  datatable()
+```
